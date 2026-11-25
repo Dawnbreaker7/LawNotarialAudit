@@ -1,0 +1,151 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-25T15:47:00.000Z",
+  "title": "Design System: Notarial Register & Branch Audit System",
+  "extensions": {
+    "colorMeta": {
+      "legal-navy": {
+        "role": "primary",
+        "displayName": "Legal Navy",
+        "canonical": "#1B2A4A",
+        "tonalRamp": ["#0D1526", "#121D36", "#1B2A4A", "#2A3E69", "#465D8C", "#788CB5", "#B8C4DC", "#E9EEF7"]
+      },
+      "antique-gold": {
+        "role": "secondary",
+        "displayName": "Antique Gold",
+        "canonical": "#B48A3E",
+        "tonalRamp": ["#4A3612", "#6E521F", "#9A722C", "#B48A3E", "#C9A55F", "#DFBE78", "#F4DDA8", "#FBF5E8"]
+      },
+      "alabaster-canvas": {
+        "role": "neutral",
+        "displayName": "Alabaster Canvas",
+        "canonical": "#F7F4EE",
+        "tonalRamp": ["#5C5548", "#807767", "#A89E8C", "#CFC5B2", "#DFD7C8", "#F1ECE1", "#FAF7F1", "#FFFFFF"]
+      },
+      "status-approved-fg": {
+        "role": "semantic",
+        "displayName": "Approved Emerald",
+        "canonical": "#065F46",
+        "tonalRamp": ["#022C22", "#064E3B", "#065F46", "#047857", "#10B981", "#6EE7B7", "#D1FAE5", "#ECFDF5"]
+      },
+      "status-review-fg": {
+        "role": "semantic",
+        "displayName": "For Review Amber",
+        "canonical": "#78350F",
+        "tonalRamp": ["#451A03", "#78350F", "#92400E", "#B45309", "#F59E0B", "#FCD34D", "#FEF3C7", "#FFFBEB"]
+      },
+      "status-flagged-fg": {
+        "role": "semantic",
+        "displayName": "Flagged Crimson",
+        "canonical": "#7F1D1D",
+        "tonalRamp": ["#450A0A", "#7F1D1D", "#991B1B", "#DC2626", "#EF4444", "#FCA5A5", "#FEE2E2", "#FEF2F2"]
+      }
+    },
+    "typographyMeta": {
+      "display": { "displayName": "Chambers Serif Display", "purpose": "Page titles and primary legal portal headings." },
+      "headline": { "displayName": "Section Serif Headline", "purpose": "Card group headers and modal titles." },
+      "body": { "displayName": "Plus Jakarta Sans Body", "purpose": "Form controls, legal descriptions, and navigation items." },
+      "mono-tabular": { "displayName": "JetBrains Mono Tabular", "purpose": "Aligned Entry #, Book/Page #, AR #, timestamps, and PHP amounts." },
+      "label": { "displayName": "Uppercase Field Label", "purpose": "Form field prompts and table column headings." }
+    },
+    "shadows": [
+      { "name": "card-hairline", "value": "0 1px 2px 0 rgba(27, 42, 74, 0.04)", "purpose": "Subtle lift for primary white ledger cards on alabaster canvas." },
+      { "name": "modal-overlay", "value": "0 20px 25px -5px rgba(2, 6, 23, 0.2), 0 8px 10px -6px rgba(2, 6, 23, 0.12)", "purpose": "Protected modal elevation for entry confirmation and lawyer review." }
+    ],
+    "motion": [
+      { "name": "ease-standard", "value": "cubic-bezier(0.22, 1, 0.36, 1)", "purpose": "Crisp hover/focus and modal transitions." }
+    ],
+    "breakpoints": [
+      { "name": "cover", "value": "360px" },
+      { "name": "unfolded", "value": "768px" },
+      { "name": "desktop", "value": "1024px" },
+      { "name": "wide", "value": "1280px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Main action trigger in legal navy with antique-gold accent icon.",
+      "html": "<button class=\"ds-btn-primary\" type=\"button\"><svg viewBox=\"0 0 24 24\" width=\"16\" height=\"16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" aria-hidden=\"true\"><path d=\"M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z\"/><circle cx=\"12\" cy=\"12\" r=\"3\"/></svg>Review &amp; Verify</button>",
+      "css": ".ds-btn-primary { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px; padding: 10px 18px; border-radius: 8px; border: 1px solid #1b2a4a; background: #1b2a4a; color: #ffffff; font-family: \"Plus Jakarta Sans\", system-ui, sans-serif; font-size: 14px; font-weight: 600; cursor: pointer; transition: background-color 150ms ease; } .ds-btn-primary svg { color: #dfbe78; } .ds-btn-primary:hover { background: #121d36; } .ds-btn-primary:focus-visible { outline: 2px solid #b48a3e; outline-offset: 2px; }"
+    },
+    {
+      "name": "Secondary Hairline Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Low-emphasis archival action paired alongside navy or emerald primary CTAs.",
+      "html": "<button class=\"ds-btn-secondary\" type=\"button\">Print Register Page</button>",
+      "css": ".ds-btn-secondary { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px; padding: 10px 16px; border-radius: 8px; border: 1px solid #dfd7c8; background: #ffffff; color: #1b2a4a; font-family: \"Plus Jakarta Sans\", system-ui, sans-serif; font-size: 14px; font-weight: 600; cursor: pointer; transition: background-color 150ms ease; } .ds-btn-secondary:hover { background: #faf7f1; } .ds-btn-secondary:focus-visible { outline: 2px solid #b48a3e; outline-offset: 2px; }"
+    },
+    {
+      "name": "Archival Input Field",
+      "kind": "input",
+      "refersTo": "input-field",
+      "description": "Touch-safe 44px register input with high-contrast stone border and gold focus ring.",
+      "html": "<input class=\"ds-input\" type=\"text\" placeholder=\"e.g. AR-2026-0012\" value=\"AR-2026-0018\" />",
+      "css": ".ds-input { width: 100%; min-height: 44px; padding: 10px 12px; border-radius: 8px; border: 1px solid #cfc5b2; background: #ffffff; color: #1c2434; font-family: \"JetBrains Mono\", ui-monospace, monospace; font-variant-numeric: tabular-nums; font-size: 14px; transition: border-color 150ms ease; } .ds-input:hover { border-color: #94a3b8; } .ds-input:focus { border-color: #1b2a4a; outline: 2px solid #b48a3e; outline-offset: 1px; }"
+    },
+    {
+      "name": "Semantic Review Pill",
+      "kind": "chip",
+      "description": "Status badges distinguishing For Review, Approved, Flagged, and Locked records.",
+      "html": "<div class=\"ds-chip-row\"><span class=\"ds-chip ds-chip-review\">For Review</span><span class=\"ds-chip ds-chip-approved\">Approved</span><span class=\"ds-chip ds-chip-flagged\">Flagged</span><span class=\"ds-chip ds-chip-locked\">Locked</span></div>",
+      "css": ".ds-chip-row { display: flex; flex-wrap: wrap; gap: 8px; } .ds-chip { display: inline-flex; align-items: center; padding: 3px 10px; border-radius: 9999px; font-family: \"Plus Jakarta Sans\", system-ui, sans-serif; font-size: 12px; font-weight: 600; border: 1px solid; } .ds-chip-review { background: #fffbeb; border-color: #fcd34d; color: #78350f; } .ds-chip-approved { background: #ecfdf5; border-color: #6ee7b7; color: #065f46; } .ds-chip-flagged { background: #fef2f2; border-color: #fca5a5; color: #7f1d1d; } .ds-chip-locked { background: #f1f5f9; border-color: #cbd5e1; color: #1e293b; }"
+    },
+    {
+      "name": "Archival Ledger Card",
+      "kind": "card",
+      "refersTo": "card-archival",
+      "description": "Crisp white card with uniform 1px hairline border and tabular PHP metric.",
+      "html": "<div class=\"ds-card\"><div class=\"ds-card-label\">Today &bull; GenSan &amp; Malungon</div><div class=\"ds-card-value\">&#8369;14,250.00</div><div class=\"ds-card-sub\">Official Fees: &#8369;12,500.00</div></div>",
+      "css": ".ds-card { border-radius: 12px; border: 1px solid #dfd7c8; background: #ffffff; padding: 20px; box-shadow: 0 1px 2px 0 rgba(27, 42, 74, 0.04); } .ds-card-label { font-family: \"Plus Jakarta Sans\", system-ui, sans-serif; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: #7d5b1c; } .ds-card-value { margin-top: 8px; font-family: \"JetBrains Mono\", ui-monospace, monospace; font-variant-numeric: tabular-nums; font-size: 24px; font-weight: 700; color: #065f46; } .ds-card-sub { margin-top: 6px; font-family: \"JetBrains Mono\", ui-monospace, monospace; font-variant-numeric: tabular-nums; font-size: 12px; color: #475569; }"
+    },
+    {
+      "name": "Owner Portal Header",
+      "kind": "nav",
+      "description": "Sticky deep legal-navy header anchored by a 2px antique-gold border.",
+      "html": "<nav class=\"ds-nav\"><div class=\"ds-nav-brand\">Owner Audit Portal</div><div class=\"ds-nav-links\"><a class=\"ds-nav-link ds-nav-active\" href=\"#\">Dashboard</a><a class=\"ds-nav-link\" href=\"#\">Master Audit</a><a class=\"ds-nav-link\" href=\"#\">Books &amp; Notary</a></div></nav>",
+      "css": ".ds-nav { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; background: #1b2a4a; border-bottom: 2px solid #b48a3e; padding: 12px 20px; color: #ffffff; } .ds-nav-brand { font-family: Georgia, serif; font-size: 15px; font-weight: 700; color: #ffffff; } .ds-nav-links { display: flex; gap: 6px; } .ds-nav-link { display: inline-flex; align-items: center; min-height: 40px; padding: 6px 12px; border-radius: 8px; font-family: \"Plus Jakarta Sans\", system-ui, sans-serif; font-size: 13px; font-weight: 500; color: #e2e8f0; text-decoration: none; } .ds-nav-link:hover { background: rgba(255,255,255,0.1); color: #ffffff; } .ds-nav-active { background: #121d36; border: 1px solid rgba(180,138,62,0.6); color: #f4dda8; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "Archival Ledger & Chambers Precision",
+    "overview": "Built for daily high-accuracy legal encoding in GenSan and Malungon offices and rapid mobile/desktop lawyer review, this system pairs warm alabaster paper surfaces with crisp 1px hairline borders, authoritative legal-navy primary actions, and antique-gold editorial accents. Heavy SaaS gradients, deep drop shadows, and decorative ornament stay out of the workspace so encoded legal facts, attachments, and PHP amounts read effortlessly.\n\nScreen portals use the Chambers alabaster/navy palette across desktop and foldable phones (360px cover screen through 1080p desktop), while @media print in RegisterPrintSheet remains strictly black-and-white (#000000 on #FFFFFF in 'Times New Roman', Times, serif) as an exact 1:1 replica of Philippine Judicial Form No. 143 As Amended.",
+    "keyCharacteristics": [
+      "Warm alabaster page canvas supporting crisp white 1px hairline cards",
+      "Deep legal-navy primary surfaces with restrained antique-gold accents",
+      "Monospace tabular numerals (tabular-nums) for every Entry No., Book/Page number, timestamp, Acknowledgement Receipt, and PHP (₱) amount",
+      "High-contrast icon + label semantic pills (For Review, Approved, Flagged, Locked, Desktop Only)",
+      "Touch-first 44px interactive minimums and zero-zoom 16px mobile inputs below 768px"
+    ],
+    "rules": [
+      {
+        "name": "The Status Clarity Rule",
+        "body": "Saturated amber (#FFFBEB / #78350F), emerald (#ECFDF5 / #065F46), crimson (#FEF2F2 / #7F1D1D), and slate (#F1F5F9 / #1E293B) are reserved exclusively for semantic entry statuses, security policies (Desktop Only), and financial total highlights—never as decorative card fills.",
+        "section": "colors"
+      },
+      {
+        "name": "The Pure Print Rule",
+        "body": "Inside @media print, all alabaster backgrounds and navy surfaces collapse to pure #FFFFFF paper and #000000 ink so Judicial Form No. 143 As Amended prints cleanly on physical register stock.",
+        "section": "colors"
+      },
+      {
+        "name": "The Tabular Ledger Rule",
+        "body": "Every Entry Number, Book/Page number, timestamp, Acknowledgement Receipt, and PHP (₱) currency value must carry tabular-nums (paired with font-mono in ledger cells and KPI totals) so vertical columns align digit-for-digit.",
+        "section": "typography"
+      }
+    ],
+    "dos": [
+      "Do format every Entry No., Book/Page number, timestamp, Acknowledgement Receipt, and PHP currency value with tabular-nums.",
+      "Do enforce uniform 1px #DFD7C8 hairline borders around cards and min-h-[44px] on mobile touch targets.",
+      "Do pair color with an icon and clear text label on all status badges (For Review, Approved, Flagged, Locked)."
+    ],
+    "donts": [
+      "Don't alter RegisterPrintSheet colors, borders, or Times New Roman typography—@media print must remain pure black-and-white 1:1 Judicial Form No. 143 As Amended.",
+      "Don't add SaaS gradients, glassmorphism, or thick one-sided accent bars (border-l-4 / border-t-4) on rounded cards.",
+      "Don't place font sizes smaller than 16px (text-base) on mobile <input> / <select> controls."
+    ]
+  }
+}

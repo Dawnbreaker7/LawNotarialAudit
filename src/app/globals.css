@@ -1,0 +1,73 @@
+@import "tailwindcss";
+
+@theme inline {
+  --font-sans: var(--font-sans), ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: var(--font-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-serif: Georgia, Cambria, "Times New Roman", Times, serif;
+}
+
+:root {
+  --color-canvas: #f7f4ee;
+  --color-surface: #ffffff;
+  --color-subtle: #faf7f1;
+  --color-muted: #f4efe4;
+  --color-border: #dfd7c8;
+  --color-border-strong: #cfc5b2;
+  --color-ink: #1b2a4a;
+  --color-ink-dark: #121d36;
+  --color-ink-body: #1c2434;
+  --color-gold: #b48a3e;
+  --color-gold-light: #dfbe78;
+  --color-gold-soft: #fbf5e8;
+}
+
+@media screen {
+  body {
+    background-color: var(--color-canvas);
+    color: var(--color-ink-body);
+  }
+
+  ::selection {
+    background-color: #1b2a4a;
+    color: #f4dda8;
+  }
+
+  input,
+  textarea,
+  select {
+    caret-color: var(--color-ink);
+  }
+
+  a:focus-visible,
+  button:focus-visible,
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible {
+    outline: 2px solid var(--color-gold);
+    outline-offset: 2px;
+  }
+}
+
+@media print {
+  @page {
+    size: landscape;
+    margin: 0.4in;
+  }
+
+  body {
+    background: #ffffff !important;
+    color: #000000 !important;
+  }
+
+  .print-sheet {
+    break-after: page;
+    page-break-after: always;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  .print-sheet:last-child {
+    break-after: auto;
+    page-break-after: auto;
+  }
+}
