@@ -1,6 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 import Link from "next/link";
 import {
   AlertTriangle,
@@ -20,11 +27,15 @@ import {
   Printer,
   Search,
   ShieldAlert,
+  ShieldCheck,
   Trash2,
   Upload,
   X,
 } from "lucide-react";
-import type { BranchRegisterSnapshot } from "@/lib/branch/register";
+import type {
+  BranchRegisterSnapshot,
+  LockedEntrySummary,
+} from "@/lib/branch/register";
 import type {
   EntryAttachment,
   NotarialEntry,
@@ -32,6 +43,11 @@ import type {
   ReviewStatus,
 } from "@/types/database";
 import AttachmentViewerPane from "@/components/AttachmentViewerPane";
+import {
+  AttachmentSkeleton,
+  EntryListSkeleton,
+  TableRowsSkeleton,
+} from "@/components/Skeletons";
 
 const NOTARIAL_ACT_TYPES = [
   "Acknowledgment",
@@ -71,36 +87,42 @@ function toLocalDateTimeInputValue(date: Date): string {
   )}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
+const PHP_FORMATTER = new Intl.NumberFormat("en-PH", {
+  style: "currency",
+  currency: "PHP",
+  minimumFractionDigits: 2,
+});
+
+const DATE_ONLY_FORMATTER = new Intl.DateTimeFormat("en-PH", {
+  year: "numeric",
+  month: "long",
+  day: "numeric",
+});
+
+const DATE_TIME_FORMATTER = new Intl.DateTimeFormat("en-PH", {
+  year: "numeric",
+  month: "short",
+  day: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+});
+
 function formatPhp(amount: number): string {
   const safe = Number.isFinite(Number(amount)) ? Number(amount) : 0;
-  return new Intl.NumberFormat("en-PH", {
-    style: "currency",
-    currency: "PHP",
-    minimumFractionDigits: 2,
-  }).format(safe);
+  return PHP_FORMATTER.format(safe);
 }
 
 function formatDateOnly(isoOrDate: string | null): string {
   if (!isoOrDate) return "Not specified";
   const parsed = new Date(isoOrDate);
   if (Number.isNaN(parsed.getTime())) return isoOrDate;
-  return parsed.toLocaleDateString("en-PH", {
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-  });
+  return DATE_ONLY_FORMATTER.format(parsed);
 }
 
 function formatDateTime(iso: string): string {
   const parsed = new Date(iso);
   if (Number.isNaN(parsed.getTime())) return iso;
-  return parsed.toLocaleString("en-PH", {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
+  return DATE_TIME_FORMATTER.format(parsed);
 }
 
 function toLocalDateFilterKey(iso: string): string {
@@ -117,16 +139,22 @@ function getManilaTodayDateKey(): string {
   return new Date(manilaMs).toISOString().slice(0, 10);
 }
 
-const MAX_ENTRY_NUMBER = 500;
-const MAX_PAGE_NO = 100;
+const MIN_PAGE_NO = 2;
+const MAX_PAGE_NO = 106;
+const MAX_ENTRY_NUMBER = 525;
+
+function getPageForEntry(entryNumber: number): number {
+  return Math.min(
+    MAX_PAGE_NO,
+    Math.max(MIN_PAGE_NO, Math.ceil(entryNumber / 5) + 1)
+  );
+}
 
 function createBlankForm(nextEntryNumber: number | null): EntryFormState {
   return {
     entry_number: nextEntryNumber !== null ? String(nextEntryNumber) : "",
     page_no:
-      nextEntryNumber !== null
-        ? String(Math.min(MAX_PAGE_NO, Math.max(1, Math.ceil(nextEntryNumber / 5))))
-        : "",
+      nextEntryNumber !== null ? String(getPageForEntry(nextEntryNumber)) : "",
     instrument_title: "",
     parties: "",
     secondary_parties: "",
@@ -140,14 +168,36 @@ function createBlankForm(nextEntryNumber: number | null): EntryFormState {
   };
 }
 
-function findNextAvailable(usedSet: Set<number>): number | null {
+function findNextAvailable(
+  usedSet: Set<number>,
+  blockedSet?: Set<number>
+): number | null {
   for (let candidate = 1; candidate <= MAX_ENTRY_NUMBER; candidate += 1) {
-    if (!usedSet.has(candidate)) {
+    if (!usedSet.has(candidate) && !blockedSet?.has(candidate)) {
       return candidate;
     }
   }
   return null;
 }
+
+const LOCK_TOKEN_STORAGE_KEY = "notarial_entry_lock_token";
+const LOCK_HEARTBEAT_MS = 30_000;
+
+type EntryLockState =
+  | { status: "idle" }
+  | { status: "acquiring"; entryNumber: number }
+  | {
+      status: "acquired";
+      entryNumber: number;
+      lockedByName: string;
+      expiresAt: string;
+    }
+  | {
+      status: "locked_by_other";
+      entryNumber: number;
+      lockedByName: string;
+      expiresAt?: string;
+    };
 
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 const ALLOWED_ATTACHMENT_TYPES = new Set([
@@ -217,15 +267,48 @@ export default function BranchRegisterClient({
   const [usedEntryNumbers, setUsedEntryNumbers] = useState<number[]>(
     initialSnapshot.usedEntryNumbers
   );
+  const [lockedEntries, setLockedEntries] = useState<LockedEntrySummary[]>(
+    initialSnapshot.lockedEntries ?? []
+  );
+  const lockTokenRef = useRef<string>("");
+  const [lockReady, setLockReady] = useState(false);
+  const [lockState, setLockState] = useState<EntryLockState>({
+    status: "idle",
+  });
+  const heldLockRef = useRef<{
+    bookId: string;
+    entryNumber: number;
+    lockToken: string;
+  } | null>(null);
+  const lockSeqRef = useRef(0);
   const [isCustomEntryMode, setIsCustomEntryMode] = useState(false);
   const [form, setForm] = useState<EntryFormState>(() =>
     createBlankForm(initialSnapshot.nextAvailableEntryNumber)
   );
 
   const [activeTab, setActiveTab] = useState<BranchWorkspaceTab>("encode");
-  const [summaryScope, setSummaryScope] = useState<SummaryScope>("book");
+  const [summaryScope, setSummaryScope] = useState<SummaryScope>(
+    initialSnapshot.scope ?? "page"
+  );
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("ALL");
   const [pageFilter, setPageFilter] = useState<string>("ALL");
+
+  const pageCacheRef = useRef<Map<number, NotarialEntry[]>>(
+    new Map([[initialSnapshot.latestPageNo, initialSnapshot.entries]])
+  );
+  const bookEntriesCacheRef = useRef<NotarialEntry[] | null>(
+    initialSnapshot.scope === "book" ? initialSnapshot.entries : null
+  );
+  const hydratedDetailsRef = useRef<Map<string, NotarialEntry>>(
+    new Map(
+      initialSnapshot.entries
+        .filter((entry) => Array.isArray(entry.attachments))
+        .map((entry) => [entry.id, entry])
+    )
+  );
+  const [loadingEntries, setLoadingEntries] = useState(false);
+  const [loadingSelectedAttachments, setLoadingSelectedAttachments] =
+    useState(false);
 
   const [formError, setFormError] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -283,6 +366,19 @@ export default function BranchRegisterClient({
     () => new Set(usedEntryNumbers),
     [usedEntryNumbers]
   );
+  const lockedByOtherMap = useMemo(() => {
+    const map = new Map<number, string>();
+    for (const item of lockedEntries) {
+      if (!item.is_own_lock) {
+        map.set(item.entry_number, item.locked_by_name);
+      }
+    }
+    return map;
+  }, [lockedEntries]);
+  const lockedByOtherSet = useMemo(
+    () => new Set(lockedByOtherMap.keys()),
+    [lockedByOtherMap]
+  );
   const parsedEntryNumber = Number(form.entry_number);
   const isOutOfBoundsEntry =
     form.entry_number.trim() !== "" &&
@@ -294,12 +390,277 @@ export default function BranchRegisterClient({
     Number.isInteger(parsedEntryNumber) &&
     parsedEntryNumber >= 1 &&
     usedEntrySet.has(parsedEntryNumber);
+  const isLockedByOtherSelected =
+    !isOutOfBoundsEntry &&
+    !isDuplicateSelected &&
+    Number.isInteger(parsedEntryNumber) &&
+    parsedEntryNumber >= 1 &&
+    ((lockState.status === "locked_by_other" &&
+      lockState.entryNumber === parsedEntryNumber) ||
+      lockedByOtherMap.has(parsedEntryNumber));
+  const lockedByOtherName =
+    lockState.status === "locked_by_other" &&
+    lockState.entryNumber === parsedEntryNumber
+      ? lockState.lockedByName
+      : (lockedByOtherMap.get(parsedEntryNumber) ?? "another user");
+
+  const nextUnlockedEntryNumber = useMemo(
+    () => findNextAvailable(usedEntrySet, lockedByOtherSet),
+    [usedEntrySet, lockedByOtherSet]
+  );
+
+  // Initialize a persistent per-tab lock token inside sessionStorage.
+  useEffect(() => {
+    try {
+      let existing = window.sessionStorage.getItem(LOCK_TOKEN_STORAGE_KEY);
+      if (!existing) {
+        existing =
+          typeof crypto !== "undefined" &&
+          typeof crypto.randomUUID === "function"
+            ? crypto.randomUUID()
+            : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        window.sessionStorage.setItem(LOCK_TOKEN_STORAGE_KEY, existing);
+      }
+      lockTokenRef.current = existing;
+    } catch {
+      lockTokenRef.current = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    }
+    setLockReady(true);
+  }, []);
+
+  const releaseEntryLockRequest = useCallback(
+    async (bookId: string, entryNumber: number, lockToken: string) => {
+      try {
+        await fetch("/api/branch/entries/lock", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          keepalive: true,
+          body: JSON.stringify({
+            action: "release",
+            bookId,
+            entryNumber,
+            lockToken,
+          }),
+        });
+      } catch {
+        // Non-fatal: lock TTL will expire automatically if offline.
+      }
+    },
+    []
+  );
+
+  const acquireEntryLockRequest = useCallback(
+    async (
+      bookId: string,
+      entryNumber: number,
+      lockToken: string,
+      seq: number
+    ) => {
+      try {
+        const res = await fetch("/api/branch/entries/lock", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "acquire",
+            bookId,
+            entryNumber,
+            lockToken,
+          }),
+        });
+        const payload = (await res.json().catch(() => ({}))) as {
+          acquired?: boolean;
+          locked_by_name?: string;
+          expires_at?: string;
+        };
+
+        if (seq !== lockSeqRef.current) return;
+
+        if (res.ok && payload.acquired) {
+          heldLockRef.current = { bookId, entryNumber, lockToken };
+          setLockState({
+            status: "acquired",
+            entryNumber,
+            lockedByName: payload.locked_by_name ?? "Your Account",
+            expiresAt: payload.expires_at ?? "",
+          });
+          setLockedEntries((prev) =>
+            prev.filter((item) => item.entry_number !== entryNumber)
+          );
+          return;
+        }
+
+        if (res.status === 423 || payload.acquired === false) {
+          heldLockRef.current = null;
+          const holderName = payload.locked_by_name ?? "another user";
+          setLockState({
+            status: "locked_by_other",
+            entryNumber,
+            lockedByName: holderName,
+            expiresAt: payload.expires_at,
+          });
+          setLockedEntries((prev) => {
+            const without = prev.filter(
+              (item) => item.entry_number !== entryNumber
+            );
+            return [
+              ...without,
+              {
+                entry_number: entryNumber,
+                locked_by_name: holderName,
+                is_own_lock: false,
+              },
+            ].sort((a, b) => a.entry_number - b.entry_number);
+          });
+        }
+      } catch {
+        // Non-fatal network hiccup; keep current UI responsive.
+      }
+    },
+    []
+  );
+
+  // Acquire/switch live lock whenever active entry_number changes.
+  useEffect(() => {
+    if (!lockReady || !lockTokenRef.current) return;
+    const bookId = snapshot.book?.id;
+    const lockToken = lockTokenRef.current;
+
+    const prevHeld = heldLockRef.current;
+    const canLockCurrent =
+      Boolean(bookId) &&
+      !snapshot.isBookFull &&
+      !isOutOfBoundsEntry &&
+      !isDuplicateSelected &&
+      Number.isInteger(parsedEntryNumber) &&
+      parsedEntryNumber >= 1;
+
+    if (
+      prevHeld &&
+      (!canLockCurrent ||
+        prevHeld.bookId !== bookId ||
+        prevHeld.entryNumber !== parsedEntryNumber)
+    ) {
+      heldLockRef.current = null;
+      void releaseEntryLockRequest(
+        prevHeld.bookId,
+        prevHeld.entryNumber,
+        prevHeld.lockToken
+      );
+    }
+
+    if (!canLockCurrent || !bookId) {
+      setLockState({ status: "idle" });
+      return;
+    }
+
+    const seq = ++lockSeqRef.current;
+    setLockState((prev) =>
+      prev.status === "acquired" && prev.entryNumber === parsedEntryNumber
+        ? prev
+        : { status: "acquiring", entryNumber: parsedEntryNumber }
+    );
+
+    void acquireEntryLockRequest(bookId, parsedEntryNumber, lockToken, seq);
+  }, [
+    lockReady,
+    snapshot.book?.id,
+    snapshot.isBookFull,
+    parsedEntryNumber,
+    isOutOfBoundsEntry,
+    isDuplicateSelected,
+    acquireEntryLockRequest,
+    releaseEntryLockRequest,
+  ]);
+
+  // 30-second heartbeat to keep active lock alive while encoder works on the form.
+  useEffect(() => {
+    if (!lockReady || !snapshot.book?.id || snapshot.isBookFull) return;
+    const bookId = snapshot.book.id;
+    const lockToken = lockTokenRef.current;
+    if (
+      !lockToken ||
+      isOutOfBoundsEntry ||
+      isDuplicateSelected ||
+      !Number.isInteger(parsedEntryNumber) ||
+      parsedEntryNumber < 1
+    ) {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      if (!heldLockRef.current) return;
+      if (
+        heldLockRef.current.bookId !== bookId ||
+        heldLockRef.current.entryNumber !== parsedEntryNumber
+      ) {
+        return;
+      }
+      const seq = lockSeqRef.current;
+      void acquireEntryLockRequest(bookId, parsedEntryNumber, lockToken, seq);
+    }, LOCK_HEARTBEAT_MS);
+
+    return () => window.clearInterval(timer);
+  }, [
+    lockReady,
+    snapshot.book?.id,
+    snapshot.isBookFull,
+    parsedEntryNumber,
+    isOutOfBoundsEntry,
+    isDuplicateSelected,
+    acquireEntryLockRequest,
+  ]);
+
+  // Release held lock reliably via sendBeacon on tab close / navigation away.
+  useEffect(() => {
+    function releaseViaBeacon() {
+      const held = heldLockRef.current;
+      if (!held) return;
+      heldLockRef.current = null;
+      const body = JSON.stringify({
+        action: "release",
+        bookId: held.bookId,
+        entryNumber: held.entryNumber,
+        lockToken: held.lockToken,
+      });
+      if (typeof navigator !== "undefined" && navigator.sendBeacon) {
+        navigator.sendBeacon(
+          "/api/branch/entries/lock",
+          new Blob([body], { type: "application/json" })
+        );
+      }
+    }
+
+    window.addEventListener("pagehide", releaseViaBeacon);
+    window.addEventListener("beforeunload", releaseViaBeacon);
+    return () => {
+      window.removeEventListener("pagehide", releaseViaBeacon);
+      window.removeEventListener("beforeunload", releaseViaBeacon);
+      releaseViaBeacon();
+    };
+  }, []);
+
+  function handleSwitchToNextAvailableEntry() {
+    if (nextUnlockedEntryNumber === null) {
+      setFormError(
+        "All remaining entry numbers are currently used or reserved by other staff accounts."
+      );
+      return;
+    }
+    setFormError(null);
+    setSubmitError(null);
+    setIsCustomEntryMode(false);
+    setForm((prev) => ({
+      ...prev,
+      entry_number: String(nextUnlockedEntryNumber),
+      page_no: String(getPageForEntry(nextUnlockedEntryNumber)),
+    }));
+  }
 
   const parsedPageNo = Number(form.page_no);
   const isOutOfBoundsPage =
     form.page_no.trim() !== "" &&
     (!Number.isInteger(parsedPageNo) ||
-      parsedPageNo < 1 ||
+      parsedPageNo < MIN_PAGE_NO ||
       parsedPageNo > MAX_PAGE_NO);
 
   const entryOptions = useMemo(
@@ -309,42 +670,57 @@ export default function BranchRegisterClient({
 
   const previewPageNo =
     Number.isInteger(parsedPageNo) &&
-    parsedPageNo >= 1 &&
+    parsedPageNo >= MIN_PAGE_NO &&
     parsedPageNo <= MAX_PAGE_NO
       ? parsedPageNo
       : Number.isInteger(parsedEntryNumber) &&
           parsedEntryNumber >= 1 &&
           parsedEntryNumber <= MAX_ENTRY_NUMBER
-        ? Math.min(MAX_PAGE_NO, Math.ceil(parsedEntryNumber / 5))
+        ? getPageForEntry(parsedEntryNumber)
         : snapshot.nextAvailableEntryNumber !== null
-          ? Math.min(
-              MAX_PAGE_NO,
-              Math.max(1, Math.ceil(snapshot.nextAvailableEntryNumber / 5))
-            )
+          ? getPageForEntry(snapshot.nextAvailableEntryNumber)
           : MAX_PAGE_NO;
 
   const availablePageNumbers = useMemo(() => {
+    const source =
+      snapshot.availablePageNumbers && snapshot.availablePageNumbers.length > 0
+        ? snapshot.availablePageNumbers
+        : snapshot.entries.map((entry) => entry.page_no);
     const pages = new Set<number>();
-    for (const entry of snapshot.entries) {
-      pages.add(entry.page_no);
+    for (const page of source) {
+      if (page >= MIN_PAGE_NO && page <= MAX_PAGE_NO) {
+        pages.add(page);
+      }
     }
     return Array.from(pages).sort((a, b) => b - a);
-  }, [snapshot.entries]);
+  }, [snapshot.availablePageNumbers, snapshot.entries]);
 
-  // Global counts for toolbar badges
+  // Global counts for toolbar badges — sourced from lightweight server counts
+  // so initial Current Page boot never needs all 500 rows downloaded.
   const globalCounts = useMemo(() => {
+    if (snapshot.counts) {
+      return {
+        total: snapshot.counts.total,
+        approved: snapshot.counts.approved,
+        flagged: snapshot.counts.flagged,
+        forReview: snapshot.counts.for_review,
+      };
+    }
+    let approved = 0;
     let flagged = 0;
     let forReview = 0;
     for (const entry of snapshot.entries) {
-      if (entry.review_status === "flagged") flagged += 1;
-      else if (entry.review_status === "for_review") forReview += 1;
+      if (entry.review_status === "approved") approved += 1;
+      else if (entry.review_status === "flagged") flagged += 1;
+      else forReview += 1;
     }
     return {
       total: snapshot.entries.length,
+      approved,
       flagged,
       forReview,
     };
-  }, [snapshot.entries]);
+  }, [snapshot.counts, snapshot.entries]);
 
   // Summary metrics scoped to Current Page vs. Entire Book
   const scopedEntries = useMemo(() => {
@@ -357,6 +733,14 @@ export default function BranchRegisterClient({
   }, [snapshot.entries, summaryScope, snapshot.latestPageNo]);
 
   const summaryStats = useMemo(() => {
+    if (summaryScope === "book" && snapshot.counts && !bookEntriesCacheRef.current) {
+      return {
+        totalUploaded: snapshot.counts.total,
+        approved: snapshot.counts.approved,
+        forReview: snapshot.counts.for_review,
+        flagged: snapshot.counts.flagged,
+      };
+    }
     let approved = 0;
     let forReview = 0;
     let flagged = 0;
@@ -373,7 +757,7 @@ export default function BranchRegisterClient({
       forReview,
       flagged,
     };
-  }, [scopedEntries]);
+  }, [scopedEntries, summaryScope, snapshot.counts]);
 
   const filteredEntries = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
@@ -491,7 +875,7 @@ export default function BranchRegisterClient({
 
     if (snapshot.isBookFull) {
       setFormError(
-        `Book ${snapshot.bookDisplayNo} (Series ${snapshot.book.series_year}) has reached the maximum 500 entries for ${branchDisplay}. Please notify the Owner to open a new Notarial Book.`
+        `Book ${snapshot.bookDisplayNo} (Series ${snapshot.book.series_year}) has reached the maximum 525 entries (Pages 2–106) for ${branchDisplay}. Please notify the Owner to open a new Notarial Book.`
       );
       return;
     }
@@ -502,21 +886,30 @@ export default function BranchRegisterClient({
       entryNum < 1 ||
       entryNum > MAX_ENTRY_NUMBER
     ) {
-      setFormError(
-        "Entry No. must be between 1 and 500. This Notarial Book has a maximum capacity of 500 entries."
-      );
+      setFormError("Entry No. must be between 1 and 525.");
       return;
     }
 
     const pageNum = Number(form.page_no);
-    if (!Number.isInteger(pageNum) || pageNum < 1 || pageNum > MAX_PAGE_NO) {
-      setFormError("Page No. must be an integer between 1 and 100.");
+    if (
+      !Number.isInteger(pageNum) ||
+      pageNum < MIN_PAGE_NO ||
+      pageNum > MAX_PAGE_NO
+    ) {
+      setFormError("Page No. must be between 2 and 106.");
       return;
     }
 
     if (usedEntrySet.has(entryNum)) {
       setFormError(
         `Entry No. #${entryNum} is already used by ${branchDisplay} and cannot be selected.`
+      );
+      return;
+    }
+
+    if (isLockedByOtherSelected) {
+      setFormError(
+        `Entry #${entryNum} is currently being used by ${lockedByOtherName}. You cannot proceed while this entry is in use.`
       );
       return;
     }
@@ -561,7 +954,7 @@ export default function BranchRegisterClient({
     const targetEntryNumber = overrideEntryNumber ?? Number(form.entry_number);
     const targetPageNumber =
       overrideEntryNumber !== undefined
-        ? Math.min(MAX_PAGE_NO, Math.max(1, Math.ceil(overrideEntryNumber / 5)))
+        ? getPageForEntry(overrideEntryNumber)
         : Number(form.page_no);
     if (overrideEntryNumber !== undefined) {
       setForm((prev) => ({
@@ -625,16 +1018,50 @@ export default function BranchRegisterClient({
           acknowledgement_receipt: form.acknowledgement_receipt.trim(),
           place_and_remarks: form.place_and_remarks.trim(),
           attachments: uploadedAttachments,
+          lock_token: lockTokenRef.current,
         }),
       });
 
       const payload = (await response.json().catch(() => ({}))) as {
         entry?: NotarialEntry;
         error?: string;
+        locked_by_name?: string;
         nextAvailableEntryNumber?: number;
       };
 
+      if (response.status === 423) {
+        heldLockRef.current = null;
+        const holderName = payload.locked_by_name ?? "another user";
+        setLockState({
+          status: "locked_by_other",
+          entryNumber: targetEntryNumber,
+          lockedByName: holderName,
+        });
+        setLockedEntries((prev) => {
+          const without = prev.filter(
+            (item) => item.entry_number !== targetEntryNumber
+          );
+          return [
+            ...without,
+            {
+              entry_number: targetEntryNumber,
+              locked_by_name: holderName,
+              is_own_lock: false,
+            },
+          ].sort((a, b) => a.entry_number - b.entry_number);
+        });
+        if (typeof payload.nextAvailableEntryNumber === "number") {
+          setConflictNextEntry(payload.nextAvailableEntryNumber);
+        }
+        setSubmitError(
+          payload.error ??
+            `Cannot save: Entry #${targetEntryNumber} is currently being used by ${holderName}.`
+        );
+        return;
+      }
+
       if (response.status === 409) {
+        heldLockRef.current = null;
         setUsedEntryNumbers((prev) =>
           prev.includes(targetEntryNumber)
             ? prev
@@ -647,64 +1074,123 @@ export default function BranchRegisterClient({
           payload.error ??
             `Entry No. ${targetEntryNumber} is already used by ${branchDisplay}.`
         );
-        setSubmitting(false);
         return;
       }
 
       if (!response.ok || !payload.entry) {
         setSubmitError(payload.error ?? "Failed to upload entry.");
-        setSubmitting(false);
         return;
       }
 
-      const createdNumber = payload.entry.entry_number;
+      heldLockRef.current = null;
+      const createdEntry = payload.entry;
+      const createdNumber = createdEntry.entry_number;
       const nextUsedList = usedEntryNumbers.includes(createdNumber)
         ? usedEntryNumbers
         : [...usedEntryNumbers, createdNumber].sort((a, b) => a - b);
       setUsedEntryNumbers(nextUsedList);
 
-      const refreshRes = await fetch("/api/branch/register", {
-        cache: "no-store",
-      });
-      if (refreshRes.ok) {
-        const nextSnapshot =
-          (await refreshRes.json()) as BranchRegisterSnapshot;
-        setSnapshot(nextSnapshot);
-        setUsedEntryNumbers(nextSnapshot.usedEntryNumbers);
-        setForm({
-          ...createBlankForm(nextSnapshot.nextAvailableEntryNumber),
-          notarized_at: toLocalDateTimeInputValue(new Date()),
-        });
-      } else {
-        const nextEntryNum = findNextAvailable(new Set(nextUsedList));
-        setSnapshot((prev) => {
-          const nextLatestPage = Math.max(
-            prev.latestPageNo,
-            payload.entry!.page_no
+      const usedAfterSave = new Set(nextUsedList);
+      const isBookNowFull = findNextAvailable(usedAfterSave) === null;
+      const nextEntryNum = findNextAvailable(usedAfterSave, lockedByOtherSet);
+      const nextLatestPage = Math.max(
+        snapshot.latestPageNo,
+        createdEntry.page_no
+      );
+      const nextAvailablePages = snapshot.availablePageNumbers.includes(
+        createdEntry.page_no
+      )
+        ? snapshot.availablePageNumbers
+        : [...snapshot.availablePageNumbers, createdEntry.page_no].sort(
+            (a, b) => b - a
           );
-          return {
-            ...prev,
-            entries: [payload.entry!, ...prev.entries],
-            usedEntryNumbers: nextUsedList,
-            nextAvailableEntryNumber: nextEntryNum,
-            nextEntryNumber: nextEntryNum,
-            isBookFull: nextEntryNum === null,
-            latestPageNo: nextLatestPage,
-            currentPageNo: nextLatestPage,
-          };
-        });
-        setForm({
-          ...createBlankForm(nextEntryNum),
-          notarized_at: toLocalDateTimeInputValue(new Date()),
-        });
+
+      // Update client caches immediately (zero redundant GET /api/branch/register roundtrip)
+      hydratedDetailsRef.current.set(createdEntry.id, createdEntry);
+
+      if (bookEntriesCacheRef.current !== null) {
+        const dedupedBook = bookEntriesCacheRef.current.filter(
+          (item) => item.id !== createdEntry.id
+        );
+        bookEntriesCacheRef.current = [createdEntry, ...dedupedBook].sort(
+          (a, b) => b.entry_number - a.entry_number
+        );
       }
+
+      const existingCachedPage = pageCacheRef.current.get(createdEntry.page_no);
+      if (existingCachedPage) {
+        const dedupedPage = existingCachedPage.filter(
+          (item) => item.id !== createdEntry.id
+        );
+        pageCacheRef.current.set(
+          createdEntry.page_no,
+          [createdEntry, ...dedupedPage].sort(
+            (a, b) => b.entry_number - a.entry_number
+          )
+        );
+      } else if (!snapshot.availablePageNumbers.includes(createdEntry.page_no)) {
+        pageCacheRef.current.set(createdEntry.page_no, [createdEntry]);
+      }
+
+      setSnapshot((prev) => {
+        const prevCounts = prev.counts ?? {
+          total: prev.entries.length,
+          approved: 0,
+          for_review: 0,
+          flagged: 0,
+        };
+        const nextCounts = {
+          total: prevCounts.total + 1,
+          approved:
+            prevCounts.approved +
+            (createdEntry.review_status === "approved" ? 1 : 0),
+          for_review:
+            prevCounts.for_review +
+            (createdEntry.review_status === "for_review" ? 1 : 0),
+          flagged:
+            prevCounts.flagged +
+            (createdEntry.review_status === "flagged" ? 1 : 0),
+        };
+
+        let nextEntries: NotarialEntry[];
+        if (summaryScope === "book") {
+          nextEntries =
+            bookEntriesCacheRef.current ??
+            [createdEntry, ...prev.entries.filter((e) => e.id !== createdEntry.id)];
+        } else if (nextLatestPage === prev.latestPageNo) {
+          nextEntries =
+            pageCacheRef.current.get(nextLatestPage) ??
+            [createdEntry, ...prev.entries.filter((e) => e.id !== createdEntry.id)];
+        } else {
+          nextEntries =
+            pageCacheRef.current.get(nextLatestPage) ?? [createdEntry];
+        }
+
+        return {
+          ...prev,
+          entries: nextEntries,
+          usedEntryNumbers: nextUsedList,
+          availablePageNumbers: nextAvailablePages,
+          counts: nextCounts,
+          nextAvailableEntryNumber: nextEntryNum,
+          nextEntryNumber: nextEntryNum,
+          isBookFull: isBookNowFull,
+          latestPageNo: nextLatestPage,
+          currentPageNo: nextLatestPage,
+        };
+      });
+
+      setForm({
+        ...createBlankForm(nextEntryNum),
+        notarized_at: toLocalDateTimeInputValue(new Date()),
+      });
 
       clearSelectedFiles();
       setIsCustomEntryMode(false);
       setShowConfirmModal(false);
       setConflictNextEntry(null);
       setSuccessMessage(
-        `Entry #${payload.entry.entry_number} (Page ${payload.entry.page_no}) submitted for lawyer review, locked, and saved to ${branchDisplay}.`
+        `Entry #${createdEntry.entry_number} (Page ${createdEntry.page_no}) submitted for lawyer review, locked, and saved to ${branchDisplay}.`
       );
     } catch {
       setSubmitError("Network error while uploading entry. Please retry.");
@@ -713,12 +1199,164 @@ export default function BranchRegisterClient({
     }
   }
 
+  async function handleScopeChange(nextScope: SummaryScope) {
+    setSummaryScope(nextScope);
+    if (nextScope === "page") {
+      setPageFilter("ALL");
+      const targetPage = snapshot.latestPageNo;
+      const cachedPage =
+        pageCacheRef.current.get(targetPage) ??
+        (bookEntriesCacheRef.current
+          ? bookEntriesCacheRef.current.filter((e) => e.page_no === targetPage)
+          : undefined);
+      if (cachedPage) {
+        pageCacheRef.current.set(targetPage, cachedPage);
+        setSnapshot((prev) => ({
+          ...prev,
+          scope: "page",
+          loadedPageNo: targetPage,
+          entries: cachedPage,
+        }));
+        return;
+      }
+
+      setLoadingEntries(true);
+      try {
+        const tokenParam = lockTokenRef.current
+          ? `&lockToken=${encodeURIComponent(lockTokenRef.current)}`
+          : "";
+        const res = await fetch(
+          `/api/branch/register?scope=page&page=${targetPage}${tokenParam}`,
+          { cache: "no-store" }
+        );
+        if (res.ok) {
+          const nextSnap = (await res.json()) as BranchRegisterSnapshot;
+          pageCacheRef.current.set(nextSnap.latestPageNo, nextSnap.entries);
+          for (const item of nextSnap.entries) {
+            if (Array.isArray(item.attachments)) {
+              hydratedDetailsRef.current.set(item.id, item);
+            }
+          }
+          setSnapshot(nextSnap);
+          setUsedEntryNumbers(nextSnap.usedEntryNumbers);
+          setLockedEntries(nextSnap.lockedEntries ?? []);
+        } else {
+          setSummaryScope(snapshot.scope);
+        }
+      } catch {
+        setSummaryScope(snapshot.scope);
+      } finally {
+        setLoadingEntries(false);
+      }
+      return;
+    }
+
+    // nextScope === "book": use cached book entries if already loaded
+    if (bookEntriesCacheRef.current) {
+      setSnapshot((prev) => ({
+        ...prev,
+        scope: "book",
+        loadedPageNo: null,
+        entries: bookEntriesCacheRef.current!,
+      }));
+      return;
+    }
+
+    setLoadingEntries(true);
+    try {
+      const tokenParam = lockTokenRef.current
+        ? `&lockToken=${encodeURIComponent(lockTokenRef.current)}`
+        : "";
+      const res = await fetch(`/api/branch/register?scope=book${tokenParam}`, {
+        cache: "no-store",
+      });
+      if (res.ok) {
+        const nextSnap = (await res.json()) as BranchRegisterSnapshot;
+        // Merge any already-hydrated entry attachments from cache
+        const merged = nextSnap.entries.map(
+          (item) => hydratedDetailsRef.current.get(item.id) ?? item
+        );
+        bookEntriesCacheRef.current = merged;
+        setSnapshot({ ...nextSnap, entries: merged });
+        setUsedEntryNumbers(nextSnap.usedEntryNumbers);
+        setLockedEntries(nextSnap.lockedEntries ?? []);
+      } else {
+        setSummaryScope(snapshot.scope);
+      }
+    } catch {
+      setSummaryScope(snapshot.scope);
+    } finally {
+      setLoadingEntries(false);
+    }
+  }
+
+  async function handleOpenEntryModal(entry: NotarialEntry) {
+    const cached = hydratedDetailsRef.current.get(entry.id);
+    if (cached && Array.isArray(cached.attachments)) {
+      setSelectedEntry(cached);
+      setLoadingSelectedAttachments(false);
+      return;
+    }
+
+    setSelectedEntry(entry);
+    if (Array.isArray(entry.attachments)) {
+      hydratedDetailsRef.current.set(entry.id, entry);
+      setLoadingSelectedAttachments(false);
+      return;
+    }
+
+    setLoadingSelectedAttachments(true);
+    try {
+      const res = await fetch(`/api/branch/entries/${entry.id}`, {
+        cache: "no-store",
+      });
+      if (res.ok) {
+        const detail = (await res.json()) as {
+          id: string;
+          attachments?: EntryAttachment[];
+          review_status?: ReviewStatus;
+          reviewed_at?: string | null;
+          review_notes?: string | null;
+        };
+        const hydratedEntry: NotarialEntry = {
+          ...entry,
+          attachments: detail.attachments ?? [],
+          review_status: detail.review_status ?? entry.review_status,
+          reviewed_at:
+            detail.reviewed_at !== undefined
+              ? detail.reviewed_at
+              : entry.reviewed_at,
+          review_notes:
+            detail.review_notes !== undefined
+              ? detail.review_notes
+              : entry.review_notes,
+        };
+        hydratedDetailsRef.current.set(entry.id, hydratedEntry);
+        if (bookEntriesCacheRef.current) {
+          bookEntriesCacheRef.current = bookEntriesCacheRef.current.map((row) =>
+            row.id === entry.id ? hydratedEntry : row
+          );
+        }
+        setSelectedEntry((current) =>
+          current && current.id === entry.id ? hydratedEntry : current
+        );
+        setSnapshot((prev) => ({
+          ...prev,
+          entries: prev.entries.map((row) =>
+            row.id === entry.id ? hydratedEntry : row
+          ),
+        }));
+      }
+    } finally {
+      setLoadingSelectedAttachments(false);
+    }
+  }
+
   function handleResetEntryFilters() {
     setStatusFilter("ALL");
     setPageFilter("ALL");
     setDateFilter("");
     setSearchQuery("");
-    setSummaryScope("book");
   }
 
   return (
@@ -965,9 +1603,9 @@ export default function BranchRegisterClient({
                 <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-red-700" />
                 <span>
                   Book {snapshot.bookDisplayNo} (Series{" "}
-                  {snapshot.book.series_year}) has reached the maximum 500
-                  entries for {branchDisplay}. Please notify the Owner to open a
-                  new Notarial Book.
+                  {snapshot.book.series_year}) has reached the maximum 525
+                  entries (Pages 2&ndash;106) for {branchDisplay}. Please notify
+                  the Owner to open a new Notarial Book.
                 </span>
               </div>
             )}
@@ -1024,17 +1662,14 @@ export default function BranchRegisterClient({
                               Number.isInteger(num) &&
                               num >= 1 &&
                               num <= MAX_ENTRY_NUMBER
-                                ? String(
-                                    Math.min(
-                                      MAX_PAGE_NO,
-                                      Math.ceil(num / 5)
-                                    )
-                                  )
+                                ? String(getPageForEntry(num))
                                 : prev.page_no,
                           }));
                         }}
                         className={`min-h-[44px] w-full rounded-lg border px-3 py-2 font-mono text-base font-semibold tabular-nums text-slate-900 focus:outline-none focus:ring-1 md:text-sm ${
-                          isDuplicateSelected || isOutOfBoundsEntry
+                          isDuplicateSelected ||
+                          isOutOfBoundsEntry ||
+                          isLockedByOtherSelected
                             ? "border-red-500 bg-red-50 focus:border-red-600 focus:ring-red-600"
                             : "border-slate-300 focus:border-slate-900 focus:ring-slate-900"
                         }`}
@@ -1054,31 +1689,34 @@ export default function BranchRegisterClient({
                               Number.isInteger(num) &&
                               num >= 1 &&
                               num <= MAX_ENTRY_NUMBER
-                                ? String(
-                                    Math.min(
-                                      MAX_PAGE_NO,
-                                      Math.ceil(num / 5)
-                                    )
-                                  )
+                                ? String(getPageForEntry(num))
                                 : prev.page_no,
                           }));
                         }}
-                        className="min-h-[44px] w-full rounded-lg border border-slate-300 bg-white px-3 py-2 font-mono text-base font-semibold tabular-nums text-slate-900 focus:border-slate-900 focus:outline-none focus:ring-1 focus:ring-slate-900 md:text-sm"
+                        className={`min-h-[44px] w-full rounded-lg border px-3 py-2 font-mono text-base font-semibold tabular-nums text-slate-900 focus:outline-none focus:ring-1 md:text-sm ${
+                          isLockedByOtherSelected
+                            ? "border-red-500 bg-red-50 focus:border-red-600 focus:ring-red-600"
+                            : "border-slate-300 bg-white focus:border-slate-900 focus:ring-slate-900"
+                        }`}
                       >
                         {snapshot.isBookFull ? (
-                          <option value="">Book Full (500 / 500)</option>
+                          <option value="">Book Full (525 / 525)</option>
                         ) : (
                           entryOptions.map((num) => {
                             const isUsed = usedEntrySet.has(num);
+                            const holderName = lockedByOtherMap.get(num);
+                            const isLockedOther = Boolean(holderName);
                             return (
                               <option
                                 key={num}
                                 value={String(num)}
-                                disabled={isUsed}
+                                disabled={isUsed || isLockedOther}
                               >
                                 {isUsed
                                   ? `Entry #${num} — Used (Locked)`
-                                  : `Entry #${num} (Available)`}
+                                  : isLockedOther
+                                    ? `Entry #${num} — In use by ${holderName}`
+                                    : `Entry #${num} (Available)`}
                               </option>
                             );
                           })
@@ -1091,7 +1729,7 @@ export default function BranchRegisterClient({
                         role="alert"
                         className="mt-1 text-xs font-medium text-red-700"
                       >
-                        Entry No. cannot exceed 500 per book.
+                        Entry No. cannot exceed 525 per book.
                       </p>
                     ) : isDuplicateSelected ? (
                       <p
@@ -1101,9 +1739,23 @@ export default function BranchRegisterClient({
                         Entry No. #{parsedEntryNumber} is already used by{" "}
                         {branchDisplay} and cannot be selected.
                       </p>
+                    ) : isLockedByOtherSelected ? (
+                      <p
+                        role="alert"
+                        className="mt-1 text-xs font-medium text-red-700"
+                      >
+                        In use by {lockedByOtherName}.
+                      </p>
+                    ) : lockState.status === "acquired" &&
+                      lockState.entryNumber === parsedEntryNumber ? (
+                      <p className="mt-1 inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-[#ECFDF5] px-2 py-0.5 text-xs font-semibold text-[#065F46]">
+                        <ShieldCheck className="h-3 w-3 shrink-0" />
+                        Reserved for your account &bull; Entry #
+                        {parsedEntryNumber}
+                      </p>
                     ) : (
                       <p className="mt-1 text-xs text-slate-500">
-                        Max 500 per book (1&ndash;500)
+                        Max 525 per book (1&ndash;525)
                       </p>
                     )}
                   </div>
@@ -1113,12 +1765,12 @@ export default function BranchRegisterClient({
                       htmlFor="page_no"
                       className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-600"
                     >
-                      Page No. (1&ndash;100) *
+                      Page No. (2&ndash;106) *
                     </label>
                     <input
                       id="page_no"
                       type="number"
-                      min={1}
+                      min={MIN_PAGE_NO}
                       max={MAX_PAGE_NO}
                       step={1}
                       required
@@ -1140,7 +1792,7 @@ export default function BranchRegisterClient({
                         role="alert"
                         className="mt-1 text-xs font-medium text-red-700"
                       >
-                        Page No. must be between 1 and 100.
+                        Page No. must be between 2 and 106.
                       </p>
                     ) : (
                       <p className="mt-1 text-xs text-slate-500">
@@ -1490,6 +2142,33 @@ export default function BranchRegisterClient({
                 )}
               </div>
 
+              {isLockedByOtherSelected && (
+                <div
+                  role="alert"
+                  className="flex flex-col gap-3 rounded-xl border border-red-300 bg-[#FEF2F2] p-4 text-sm text-[#7F1D1D] sm:flex-row sm:items-center sm:justify-between"
+                >
+                  <div className="flex items-start gap-2.5">
+                    <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-red-700" />
+                    <span className="font-medium">
+                      Entry #{parsedEntryNumber} is currently being used by{" "}
+                      <strong>{lockedByOtherName}</strong>. You cannot proceed
+                      while this entry is in use.
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleSwitchToNextAvailableEntry}
+                    disabled={nextUnlockedEntryNumber === null}
+                    className="inline-flex min-h-[44px] shrink-0 items-center justify-center rounded-lg bg-[#1B2A4A] px-3.5 py-2 text-xs font-semibold text-white transition hover:bg-[#121D36] disabled:opacity-50"
+                  >
+                    Switch to Next Available Entry
+                    {nextUnlockedEntryNumber !== null
+                      ? ` (#${nextUnlockedEntryNumber})`
+                      : ""}
+                  </button>
+                </div>
+              )}
+
               <div className="flex items-center justify-end border-t border-[#EAE3D5] pt-4">
                 <button
                   type="submit"
@@ -1497,6 +2176,7 @@ export default function BranchRegisterClient({
                     !snapshot.book ||
                     snapshot.isBookFull ||
                     isDuplicateSelected ||
+                    isLockedByOtherSelected ||
                     isOutOfBoundsEntry ||
                     isOutOfBoundsPage ||
                     !hasValidAmountPaid
@@ -1537,10 +2217,7 @@ export default function BranchRegisterClient({
                     type="button"
                     role="radio"
                     aria-checked={summaryScope === "page"}
-                    onClick={() => {
-                      setSummaryScope("page");
-                      setPageFilter("ALL");
-                    }}
+                    onClick={() => handleScopeChange("page")}
                     className={`rounded-md px-3 py-1.5 text-xs font-semibold transition ${
                       summaryScope === "page"
                         ? "bg-[#1B2A4A] text-white shadow-2xs"
@@ -1553,7 +2230,7 @@ export default function BranchRegisterClient({
                     type="button"
                     role="radio"
                     aria-checked={summaryScope === "book"}
-                    onClick={() => setSummaryScope("book")}
+                    onClick={() => handleScopeChange("book")}
                     className={`rounded-md px-3 py-1.5 text-xs font-semibold transition ${
                       summaryScope === "book"
                         ? "bg-[#1B2A4A] text-white shadow-2xs"
@@ -1743,8 +2420,7 @@ export default function BranchRegisterClient({
                   {(statusFilter !== "ALL" ||
                     pageFilter !== "ALL" ||
                     dateFilter !== "" ||
-                    searchQuery !== "" ||
-                    summaryScope !== "book") && (
+                    searchQuery !== "") && (
                     <button
                       type="button"
                       onClick={handleResetEntryFilters}
@@ -1755,26 +2431,55 @@ export default function BranchRegisterClient({
                   )}
                 </div>
               </div>
+              {summaryScope === "page" &&
+                (searchQuery.trim() !== "" || dateFilter !== "" || statusFilter !== "ALL") &&
+                globalCounts.total > snapshot.entries.length && (
+                  <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-200 bg-[#FFFBEB] px-3 py-2 text-xs text-[#78350F]">
+                    <span>
+                      Filtering <strong>Current Page (Page {snapshot.latestPageNo})</strong> only.
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleScopeChange("book")}
+                      className="font-semibold underline hover:text-[#1B2A4A]"
+                    >
+                      Search Entire Book ({globalCounts.total} entries) &rarr;
+                    </button>
+                  </div>
+                )}
             </div>
 
             {/* Clickable Entries Container */}
             <div className="rounded-xl border border-[#DFD7C8] bg-white shadow-xs">
               {/* Mobile Stacked Register Cards (< 768px) */}
               <div className="space-y-3 p-4 md:hidden">
-                {filteredEntries.length === 0 ? (
+                {loadingEntries ? (
+                  <EntryListSkeleton rows={4} />
+                ) : filteredEntries.length === 0 ? (
                   <div className="rounded-xl border border-[#EAE3D5] bg-[#FAF7F1] px-4 py-8 text-center text-sm text-slate-600">
-                    {snapshot.entries.length === 0 ? (
+                    {globalCounts.total === 0 ? (
                       `No entries recorded yet for ${branchDisplay}.`
                     ) : (
                       <div className="flex flex-col items-center gap-2">
                         <span>No entries match your active filters.</span>
-                        <button
-                          type="button"
-                          onClick={handleResetEntryFilters}
-                          className="min-h-[44px] rounded-lg border border-[#DFD7C8] bg-white px-3.5 py-2 text-xs font-semibold text-[#1B2A4A] hover:bg-[#FAF7F1]"
-                        >
-                          Show All {snapshot.entries.length} Entries
-                        </button>
+                        <div className="flex flex-wrap justify-center gap-2">
+                          <button
+                            type="button"
+                            onClick={handleResetEntryFilters}
+                            className="min-h-[44px] rounded-lg border border-[#DFD7C8] bg-white px-3.5 py-2 text-xs font-semibold text-[#1B2A4A] hover:bg-[#FAF7F1]"
+                          >
+                            Reset Filters
+                          </button>
+                          {summaryScope === "page" && (
+                            <button
+                              type="button"
+                              onClick={() => handleScopeChange("book")}
+                              className="min-h-[44px] rounded-lg bg-[#1B2A4A] px-3.5 py-2 text-xs font-semibold text-white hover:bg-[#121D36]"
+                            >
+                              View Entire Book ({globalCounts.total})
+                            </button>
+                          )}
+                        </div>
                       </div>
                     )}
                   </div>
@@ -1784,11 +2489,11 @@ export default function BranchRegisterClient({
                       key={entry.id}
                       role="button"
                       tabIndex={0}
-                      onClick={() => setSelectedEntry(entry)}
+                      onClick={() => handleOpenEntryModal(entry)}
                       onKeyDown={(e) => {
                         if (e.key === "Enter" || e.key === " ") {
                           e.preventDefault();
-                          setSelectedEntry(entry);
+                          handleOpenEntryModal(entry);
                         }
                       }}
                       className="cursor-pointer rounded-xl border border-[#DFD7C8] bg-white p-4 shadow-xs transition hover:bg-stone-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#1B2A4A]"
@@ -1898,24 +2603,37 @@ export default function BranchRegisterClient({
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
-                    {filteredEntries.length === 0 ? (
+                    {loadingEntries ? (
+                      <TableRowsSkeleton rows={6} columns={8} />
+                    ) : filteredEntries.length === 0 ? (
                       <tr>
                         <td
                           colSpan={8}
                           className="px-4 py-10 text-center text-slate-500"
                         >
-                          {snapshot.entries.length === 0 ? (
+                          {globalCounts.total === 0 ? (
                             `No entries recorded yet for ${branchDisplay}.`
                           ) : (
                             <div className="flex flex-col items-center gap-2">
                               <span>No entries match your active filters.</span>
-                              <button
-                                type="button"
-                                onClick={handleResetEntryFilters}
-                                className="min-h-[44px] rounded-lg border border-[#DFD7C8] bg-white px-3.5 py-2 text-xs font-semibold text-[#1B2A4A] hover:bg-[#FAF7F1]"
-                              >
-                                Show All {snapshot.entries.length} Entries
-                              </button>
+                              <div className="flex flex-wrap justify-center gap-2">
+                                <button
+                                  type="button"
+                                  onClick={handleResetEntryFilters}
+                                  className="min-h-[44px] rounded-lg border border-[#DFD7C8] bg-white px-3.5 py-2 text-xs font-semibold text-[#1B2A4A] hover:bg-[#FAF7F1]"
+                                >
+                                  Reset Filters
+                                </button>
+                                {summaryScope === "page" && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleScopeChange("book")}
+                                    className="min-h-[44px] rounded-lg bg-[#1B2A4A] px-3.5 py-2 text-xs font-semibold text-white hover:bg-[#121D36]"
+                                  >
+                                    View Entire Book ({globalCounts.total})
+                                  </button>
+                                )}
+                              </div>
                             </div>
                           )}
                         </td>
@@ -1926,11 +2644,11 @@ export default function BranchRegisterClient({
                           key={entry.id}
                           role="button"
                           tabIndex={0}
-                          onClick={() => setSelectedEntry(entry)}
+                          onClick={() => handleOpenEntryModal(entry)}
                           onKeyDown={(e) => {
                             if (e.key === "Enter" || e.key === " ") {
                               e.preventDefault();
-                              setSelectedEntry(entry);
+                              handleOpenEntryModal(entry);
                             }
                           }}
                           className="cursor-pointer align-top transition hover:bg-stone-50 focus-visible:bg-stone-50 focus-visible:outline-none"
@@ -2247,7 +2965,7 @@ export default function BranchRegisterClient({
               </button>
               <button
                 type="button"
-                disabled={submitting}
+                disabled={submitting || isLockedByOtherSelected}
                 onClick={() => void handleConfirmUpload()}
                 className="inline-flex min-h-[44px] w-full items-center justify-center gap-2 rounded-lg bg-emerald-700 px-5 py-2 text-sm font-semibold text-white transition hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto"
               >
@@ -2407,11 +3125,18 @@ export default function BranchRegisterClient({
               <div className="space-y-2">
                 <h4 className="text-xs font-semibold uppercase tracking-wide text-[#64748B]">
                   Supporting Attachments (
-                  {selectedEntry.attachments?.length ?? 0})
+                  {loadingSelectedAttachments
+                    ? "…"
+                    : (selectedEntry.attachments?.length ?? 0)}
+                  )
                 </h4>
-                <AttachmentViewerPane
-                  attachments={selectedEntry.attachments ?? []}
-                />
+                {loadingSelectedAttachments ? (
+                  <AttachmentSkeleton />
+                ) : (
+                  <AttachmentViewerPane
+                    attachments={selectedEntry.attachments ?? []}
+                  />
+                )}
               </div>
             </div>
 

@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { requireApprovedOwnerApi } from "@/lib/owner/auth";
 import { createAdminClient } from "@/lib/supabase/admin";
 
+export const preferredRegion = "sin1";
+
 export async function GET() {
   try {
     const auth = await requireApprovedOwnerApi();

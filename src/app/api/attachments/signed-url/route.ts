@@ -5,6 +5,8 @@ import { createAdminClient } from "@/lib/supabase/admin";
 const BUCKET_NAME = "notarial-attachments";
 const SIGNED_URL_EXPIRES_IN_SECONDS = 900; // 15 minutes
 
+export const preferredRegion = "sin1";
+
 export async function POST(request: Request) {
   try {
     const valid = await getValidSession({ touchLastSeen: true });

@@ -2,7 +2,7 @@ import { redirect } from "next/navigation";
 import PrintRegisterClient from "@/components/PrintRegisterClient";
 import SessionWatcher from "@/components/SessionWatcher";
 import { canAccessBranchPortal, getValidSession } from "@/lib/auth/session";
-import { fetchBranchRegisterSnapshot } from "@/lib/branch/register";
+import { fetchBranchPrintSnapshot } from "@/lib/branch/register";
 
 export const dynamic = "force-dynamic";
 
@@ -24,21 +24,8 @@ export default async function BranchRegisterPrintPage({
     redirect("/owner/dashboard");
   }
 
-  const [snapshot, params] = await Promise.all([
-    fetchBranchRegisterSnapshot(valid),
-    searchParams,
-  ]);
-
-  const rawPage = params.page?.trim().toLowerCase();
-  let initialSelectedPage = String(snapshot.latestPageNo);
-  if (rawPage === "all") {
-    initialSelectedPage = "all";
-  } else if (rawPage) {
-    const parsedPage = Number(rawPage);
-    if (Number.isInteger(parsedPage) && parsedPage >= 1) {
-      initialSelectedPage = String(parsedPage);
-    }
-  }
+  const params = await searchParams;
+  const snapshot = await fetchBranchPrintSnapshot(valid, params.page);
 
   return (
     <>
@@ -47,10 +34,7 @@ export default async function BranchRegisterPrintPage({
         deviceId={valid.device?.id ?? null}
         isApproved={true}
       />
-      <PrintRegisterClient
-        snapshot={snapshot}
-        initialSelectedPage={initialSelectedPage}
-      />
+      <PrintRegisterClient snapshot={snapshot} />
     </>
   );
 }

@@ -32,6 +32,7 @@ import {
   type DashboardPeriod,
 } from "@/lib/owner/periods";
 import type { PaymentType, ReviewStatus } from "@/types/database";
+import { EntryListSkeleton } from "@/components/Skeletons";
 
 interface OwnerDashboardClientProps {
   data: OwnerDashboardData;
@@ -55,23 +56,27 @@ const ENTRY_ACTIONS = new Set([
 
 const REVIEW_ACTIONS = new Set(["APPROVE_ENTRY", "FLAG_ENTRY"]);
 
+const PHP_FORMATTER = new Intl.NumberFormat("en-PH", {
+  style: "currency",
+  currency: "PHP",
+  minimumFractionDigits: 2,
+});
+
+const DATE_TIME_FORMATTER = new Intl.DateTimeFormat("en-PH", {
+  month: "short",
+  day: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+});
+
 function formatPhp(amount: number): string {
-  return new Intl.NumberFormat("en-PH", {
-    style: "currency",
-    currency: "PHP",
-    minimumFractionDigits: 2,
-  }).format(amount);
+  return PHP_FORMATTER.format(Number.isFinite(amount) ? amount : 0);
 }
 
 function formatDateTime(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleString("en-PH", {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
+  return DATE_TIME_FORMATTER.format(d);
 }
 
 function renderReviewStatusBadge(status: ReviewStatus) {
@@ -159,6 +164,26 @@ function getLogBadge(log: EnrichedAuditLog) {
         classes: "bg-[#FBF5E8] text-[#78350F] border-[#B48A3E]/50",
         isSecurity: false,
       };
+    case "STAFF_ACCOUNT_CREATED":
+    case "STAFF_ACCESS_RESTORED":
+      return {
+        label: log.action,
+        classes: "bg-[#ECFDF5] text-[#065F46] border-emerald-200",
+        isSecurity: false,
+      };
+    case "STAFF_ACCESS_REVOKED":
+    case "STAFF_ACCOUNT_DELETED":
+      return {
+        label: log.action,
+        classes: "bg-[#FEF2F2] text-[#7F1D1D] border-red-200",
+        isSecurity: true,
+      };
+    case "STAFF_PASSWORD_RESET":
+      return {
+        label: "STAFF_PASSWORD_RESET",
+        classes: "bg-[#FFFBEB] text-[#78350F] border-amber-200",
+        isSecurity: true,
+      };
     default:
       return {
         label: log.action,
@@ -209,7 +234,27 @@ function summarizeLog(log: EnrichedAuditLog): string {
     return `${String(newData.branch_code ?? "Owner")} signed in from ${String(newData.device_label ?? newData.device_type ?? "device")}`;
   }
   if (log.action === "LOGIN_SUCCESS") {
-    return `Signed in from ${String(newData.device_label ?? "PC")}`;
+    const staffName =
+      typeof newData.staff_name === "string" ? newData.staff_name : null;
+    return staffName
+      ? `${staffName} signed in from ${String(newData.device_label ?? "PC")}`
+      : `Signed in from ${String(newData.device_label ?? "PC")}`;
+  }
+  if (log.action === "STAFF_ACCOUNT_CREATED") {
+    return `Created staff account "${String(newData.username ?? "")}" (${String(newData.full_name ?? "")})`;
+  }
+  if (log.action === "STAFF_ACCESS_REVOKED") {
+    return `Removed access for ${String(newData.full_name ?? "")} (${String(newData.username ?? "")})`;
+  }
+  if (log.action === "STAFF_ACCESS_RESTORED") {
+    return `Restored access for ${String(newData.full_name ?? "")} (${String(newData.username ?? "")})`;
+  }
+  if (log.action === "STAFF_PASSWORD_RESET") {
+    return `Reset password for ${String(newData.full_name ?? "")} (${String(newData.username ?? "")})`;
+  }
+  if (log.action === "STAFF_ACCOUNT_DELETED") {
+    const oldData = (log.old_data ?? {}) as Record<string, unknown>;
+    return `Deleted staff account "${String(oldData.username ?? "")}" (${String(oldData.full_name ?? "")})`;
   }
   return log.action;
 }
@@ -532,6 +577,9 @@ export default function OwnerDashboardClient({
   const [periodLoading, setPeriodLoading] = useState(false);
   const [periodError, setPeriodError] = useState<string | null>(null);
   const periodRequestRef = useRef(0);
+  const periodCacheRef = useRef<Map<string, AuditEntryItem[]>>(new Map());
+  const allEntriesCacheRef = useRef<AuditEntryItem[] | null>(null);
+  const logsCacheRef = useRef<EnrichedAuditLog[] | null>(null);
 
   // Lock background page scroll and allow Escape to dismiss active modal.
   useEffect(() => {
@@ -556,15 +604,24 @@ export default function OwnerDashboardClient({
     setEntrySearch("");
     setEntriesError(null);
     setActiveModal("entries");
+    if (allEntriesCacheRef.current) {
+      setModalEntries(allEntriesCacheRef.current);
+      setEntriesLoading(false);
+      return;
+    }
+
     setEntriesLoading(true);
     try {
-      const res = await fetch("/api/owner/audit", { cache: "no-store" });
+      const res = await fetch("/api/owner/audit?page_size=all", {
+        cache: "no-store",
+      });
       const payload = (await res.json()) as Partial<OwnerAuditResult> & {
         error?: string;
       };
       if (!res.ok) {
         setEntriesError(payload.error ?? "Failed to load all entries.");
       } else if (Array.isArray(payload.entries)) {
+        allEntriesCacheRef.current = payload.entries;
         setModalEntries(payload.entries);
       }
     } catch {
@@ -579,6 +636,12 @@ export default function OwnerDashboardClient({
     setLogSearch("");
     setLogsError(null);
     setActiveModal("logs");
+    if (logsCacheRef.current) {
+      setModalLogs(logsCacheRef.current);
+      setLogsLoading(false);
+      return;
+    }
+
     setLogsLoading(true);
     try {
       const res = await fetch("/api/owner/logs?limit=100", {
@@ -591,6 +654,7 @@ export default function OwnerDashboardClient({
       if (!res.ok) {
         setLogsError(payload.error ?? "Failed to load recent logs.");
       } else if (Array.isArray(payload.logs)) {
+        logsCacheRef.current = payload.logs;
         setModalLogs(payload.logs);
       }
     } catch {
@@ -609,18 +673,26 @@ export default function OwnerDashboardClient({
     period: DashboardPeriod,
     branch: EntryBranchFilter
   ) {
+    const cacheKey = `${period}:${branch}`;
+    const cached = periodCacheRef.current.get(cacheKey);
+    if (cached) {
+      setPeriodError(null);
+      setPeriodLoading(false);
+      setPeriodEntries(cached);
+      return;
+    }
+
     const requestId = ++periodRequestRef.current;
     setPeriodLoading(true);
     setPeriodError(null);
     try {
       const { date_from, date_to } = getManilaPeriodDateRange(period);
-      const params = new URLSearchParams();
+      const params = new URLSearchParams({ page_size: "all" });
       if (date_from) params.set("date_from", date_from);
       if (date_to) params.set("date_to", date_to);
       if (branch !== "ALL") params.set("branch_code", branch);
 
-      const query = params.toString();
-      const url = query ? `/api/owner/audit?${query}` : "/api/owner/audit";
+      const url = `/api/owner/audit?${params.toString()}`;
       const res = await fetch(url, { cache: "no-store" });
       const payload = (await res.json()) as Partial<OwnerAuditResult> & {
         error?: string;
@@ -630,6 +702,7 @@ export default function OwnerDashboardClient({
       if (!res.ok) {
         setPeriodError(payload.error ?? "Failed to load period breakdown.");
       } else if (Array.isArray(payload.entries)) {
+        periodCacheRef.current.set(cacheKey, payload.entries);
         setPeriodEntries(payload.entries);
       }
     } catch {
@@ -1165,8 +1238,8 @@ export default function OwnerDashboardClient({
           }
         >
           {entriesLoading ? (
-            <div className="py-10 text-center text-sm text-[#64748B]">
-              Loading register entries...
+            <div className="py-4">
+              <EntryListSkeleton rows={4} />
             </div>
           ) : entriesError ? (
             <div className="my-4 rounded-lg border border-red-200 bg-[#FEF2F2] px-4 py-3 text-sm text-[#7F1D1D]">
@@ -1291,8 +1364,8 @@ export default function OwnerDashboardClient({
           }
         >
           {logsLoading ? (
-            <div className="py-10 text-center text-sm text-[#64748B]">
-              Loading activity &amp; security logs...
+            <div className="py-4">
+              <EntryListSkeleton rows={4} />
             </div>
           ) : logsError ? (
             <div className="my-4 rounded-lg border border-red-200 bg-[#FEF2F2] px-4 py-3 text-sm text-[#7F1D1D]">
@@ -1453,8 +1526,8 @@ export default function OwnerDashboardClient({
           </div>
 
           {periodLoading ? (
-            <div className="py-10 text-center text-sm text-[#64748B]">
-              Loading period transactions...
+            <div className="py-4">
+              <EntryListSkeleton rows={4} />
             </div>
           ) : periodError ? (
             <div className="my-4 rounded-lg border border-red-200 bg-[#FEF2F2] px-4 py-3 text-sm text-[#7F1D1D]">

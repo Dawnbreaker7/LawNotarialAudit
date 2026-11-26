@@ -1,5 +1,5 @@
 import OwnerAuditClient from "@/components/OwnerAuditClient";
-import { queryOwnerAuditData } from "@/lib/owner/audit";
+import { queryOwnerAuditData, queryOwnerEntryById } from "@/lib/owner/audit";
 import {
   getManilaPeriodDateRange,
   normalizeDashboardPeriod,
@@ -48,13 +48,18 @@ export default async function OwnerAuditPage({
   const initialDateTo = params.date_to?.trim() || periodRange?.date_to || "";
   const initialReviewId = params.review_id?.trim() || undefined;
 
-  const initialData = await queryOwnerAuditData({
-    branch_code: branchCode,
-    review_status: initialStatus,
-    payment_type: initialPaymentType,
-    date_from: initialDateFrom || undefined,
-    date_to: initialDateTo || undefined,
-  });
+  const [initialData, initialReviewEntry] = await Promise.all([
+    queryOwnerAuditData({
+      branch_code: branchCode,
+      review_status: initialStatus,
+      payment_type: initialPaymentType,
+      date_from: initialDateFrom || undefined,
+      date_to: initialDateTo || undefined,
+      page: 1,
+      page_size: 25,
+    }),
+    initialReviewId ? queryOwnerEntryById(initialReviewId) : Promise.resolve(null),
+  ]);
 
   return (
     <OwnerAuditClient
@@ -65,6 +70,7 @@ export default async function OwnerAuditPage({
       initialDateFrom={initialDateFrom}
       initialDateTo={initialDateTo}
       initialReviewId={initialReviewId}
+      initialReviewEntry={initialReviewEntry}
     />
   );
 }

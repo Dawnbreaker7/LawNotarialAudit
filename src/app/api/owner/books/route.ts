@@ -4,6 +4,8 @@ import { getBranchDisplayName } from "@/lib/auth/session";
 import { requireApprovedOwnerApi } from "@/lib/owner/auth";
 import { fetchOwnerBooksSnapshot } from "@/lib/owner/books";
 
+export const preferredRegion = "sin1";
+
 export async function GET() {
   try {
     const auth = await requireApprovedOwnerApi();

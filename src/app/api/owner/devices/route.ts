@@ -3,6 +3,8 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { getValidSession } from "@/lib/auth/session";
 import { fetchOwnerDevicesSnapshot } from "@/lib/owner/devices";
 
+export const preferredRegion = "sin1";
+
 async function broadcastEvent(
   channelName: string,
   event: string,

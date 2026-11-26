@@ -1,10 +1,12 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import Link from "next/link";
 import * as XLSX from "xlsx";
 import {
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   Clock,
   Eye,
   FileSpreadsheet,
@@ -20,6 +22,11 @@ import {
   X,
 } from "lucide-react";
 import AttachmentViewerPane from "@/components/AttachmentViewerPane";
+import {
+  AttachmentSkeleton,
+  EntryListSkeleton,
+  TableRowsSkeleton,
+} from "@/components/Skeletons";
 import type {
   AuditBookOption,
   AuditEntryItem,
@@ -45,6 +52,7 @@ interface OwnerAuditClientProps {
   initialDateFrom?: string;
   initialDateTo?: string;
   initialReviewId?: string;
+  initialReviewEntry?: AuditEntryItem | null;
 }
 
 function renderAuditPaymentBadge(paymentType: PaymentType) {
@@ -122,25 +130,29 @@ const DIFF_FIELDS: Array<{ key: string; label: string }> = [
   { key: "place_and_remarks", label: "Place / Remarks" },
 ];
 
+const AUDIT_PHP_FORMATTER = new Intl.NumberFormat("en-PH", {
+  style: "currency",
+  currency: "PHP",
+  minimumFractionDigits: 2,
+});
+
+const AUDIT_DATETIME_FORMATTER = new Intl.DateTimeFormat("en-PH", {
+  year: "numeric",
+  month: "short",
+  day: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+});
+
 function formatPhp(amount: number): string {
   const safe = Number.isFinite(Number(amount)) ? Number(amount) : 0;
-  return new Intl.NumberFormat("en-PH", {
-    style: "currency",
-    currency: "PHP",
-    minimumFractionDigits: 2,
-  }).format(safe);
+  return AUDIT_PHP_FORMATTER.format(safe);
 }
 
 function formatDateTime(iso: string): string {
   const parsed = new Date(iso);
   if (Number.isNaN(parsed.getTime())) return iso;
-  return parsed.toLocaleString("en-PH", {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
+  return AUDIT_DATETIME_FORMATTER.format(parsed);
 }
 
 function toLocalDateTimeInputValue(iso: string): string {
@@ -174,14 +186,25 @@ export default function OwnerAuditClient({
   initialDateFrom = "",
   initialDateTo = "",
   initialReviewId,
+  initialReviewEntry = null,
 }: OwnerAuditClientProps) {
   const initialReviewTarget = initialReviewId
-    ? (initialData.entries.find((item) => item.id === initialReviewId) ?? null)
+    ? (initialReviewEntry ??
+        initialData.entries.find((item) => item.id === initialReviewId) ??
+        null)
     : null;
 
   const [entries, setEntries] = useState<AuditEntryItem[]>(initialData.entries);
   const [books] = useState<AuditBookOption[]>(initialData.books);
   const [totals, setTotals] = useState<AuditTotals>(initialData.totals);
+  const [page, setPage] = useState<number>(initialData.page ?? 1);
+  const [pageSize] = useState<number>(initialData.pageSize ?? 25);
+  const [totalCount, setTotalCount] = useState<number>(
+    initialData.totalCount ?? initialData.entries.length
+  );
+  const [totalPages, setTotalPages] = useState<number>(
+    initialData.totalPages ?? 1
+  );
 
   const [branchCode, setBranchCode] = useState(initialBranchCode);
   const [bookId, setBookId] = useState("ALL");
@@ -191,16 +214,29 @@ export default function OwnerAuditClient({
   const [dateTo, setDateTo] = useState(initialDateTo);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(false);
+  const [exportingExcel, setExportingExcel] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const [reviewEntry, setReviewEntry] = useState<AuditEntryItem | null>(
     initialReviewTarget
   );
+  const [reviewAttachmentsLoading, setReviewAttachmentsLoading] =
+    useState(false);
   const [reviewNotesInput, setReviewNotesInput] = useState(
     initialReviewTarget?.review_notes ?? ""
   );
   const [reviewSaving, setReviewSaving] = useState(false);
   const [reviewError, setReviewError] = useState<string | null>(null);
+
+  const hydratedEntryCacheRef = useRef<Map<string, AuditEntryItem>>(
+    new Map(
+      initialReviewTarget?.attachments_loaded
+        ? [[initialReviewTarget.id, initialReviewTarget]]
+        : []
+    )
+  );
+  const isInitialSearchMountRef = useRef(true);
+  const activeFilterAbortRef = useRef<AbortController | null>(null);
 
   const [editModal, setEditModal] = useState<EditModalState | null>(null);
   const [editSaving, setEditSaving] = useState(false);
@@ -210,6 +246,61 @@ export default function OwnerAuditClient({
   const [historyLogs, setHistoryLogs] = useState<EnrichedAuditLog[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
 
+  // Debounced live search (300ms) for instant Master Audit lookup.
+  useEffect(() => {
+    if (isInitialSearchMountRef.current) {
+      isInitialSearchMountRef.current = false;
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void applyFilters({ search, page: 1 });
+    }, 300);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search]);
+
+  function buildFilterParams(overrides?: {
+    branch_code?: string;
+    book_id?: string;
+    status?: string;
+    payment_type?: string;
+    date_from?: string;
+    date_to?: string;
+    search?: string;
+    page?: number;
+    page_size?: number | "all";
+  }): URLSearchParams {
+    const nextBranch = overrides?.branch_code ?? branchCode;
+    const nextBook = overrides?.book_id ?? bookId;
+    const nextStatus = overrides?.status ?? reviewStatus;
+    const nextPaymentType = overrides?.payment_type ?? paymentTypeFilter;
+    const nextFrom = overrides?.date_from ?? dateFrom;
+    const nextTo = overrides?.date_to ?? dateTo;
+    const nextSearch = overrides?.search ?? search;
+    const nextPage = overrides?.page ?? 1;
+    const nextPageSize = overrides?.page_size ?? pageSize;
+
+    const params = new URLSearchParams();
+    if (nextBranch && nextBranch !== "ALL") {
+      params.set("branch_code", nextBranch);
+    }
+    if (nextBook && nextBook !== "ALL") {
+      params.set("book_id", nextBook);
+    }
+    if (nextStatus && nextStatus !== "ALL") {
+      params.set("status", nextStatus);
+    }
+    if (nextPaymentType && nextPaymentType !== "ALL") {
+      params.set("payment_type", nextPaymentType);
+    }
+    if (nextFrom) params.set("date_from", nextFrom);
+    if (nextTo) params.set("date_to", nextTo);
+    if (nextSearch.trim()) params.set("search", nextSearch.trim());
+    params.set("page", String(nextPage));
+    params.set("page_size", String(nextPageSize));
+    return params;
+  }
+
   async function applyFilters(overrides?: {
     branch_code?: string;
     book_id?: string;
@@ -218,37 +309,24 @@ export default function OwnerAuditClient({
     date_from?: string;
     date_to?: string;
     search?: string;
+    page?: number;
   }) {
-    const nextBranch = overrides?.branch_code ?? branchCode;
-    const nextBook = overrides?.book_id ?? bookId;
-    const nextStatus = overrides?.status ?? reviewStatus;
-    const nextPaymentType = overrides?.payment_type ?? paymentTypeFilter;
-    const nextFrom = overrides?.date_from ?? dateFrom;
-    const nextTo = overrides?.date_to ?? dateTo;
-    const nextSearch = overrides?.search ?? search;
+    activeFilterAbortRef.current?.abort();
+    const controller = new AbortController();
+    activeFilterAbortRef.current = controller;
 
     setLoading(true);
     setErrorMsg(null);
     try {
-      const params = new URLSearchParams();
-      if (nextBranch && nextBranch !== "ALL") {
-        params.set("branch_code", nextBranch);
-      }
-      if (nextBook && nextBook !== "ALL") {
-        params.set("book_id", nextBook);
-      }
-      if (nextStatus && nextStatus !== "ALL") {
-        params.set("status", nextStatus);
-      }
-      if (nextPaymentType && nextPaymentType !== "ALL") {
-        params.set("payment_type", nextPaymentType);
-      }
-      if (nextFrom) params.set("date_from", nextFrom);
-      if (nextTo) params.set("date_to", nextTo);
-      if (nextSearch.trim()) params.set("search", nextSearch.trim());
+      const params = buildFilterParams({
+        ...overrides,
+        page: overrides?.page ?? 1,
+        page_size: pageSize,
+      });
 
       const res = await fetch(`/api/owner/audit?${params.toString()}`, {
         cache: "no-store",
+        signal: controller.signal,
       });
       const data = (await res.json()) as OwnerAuditResult & { error?: string };
       if (!res.ok) {
@@ -257,16 +335,22 @@ export default function OwnerAuditClient({
       }
       setEntries(data.entries);
       setTotals(data.totals);
-    } catch {
+      setPage(data.page ?? 1);
+      setTotalCount(data.totalCount ?? data.entries.length);
+      setTotalPages(data.totalPages ?? 1);
+    } catch (err) {
+      if ((err as { name?: string })?.name === "AbortError") return;
       setErrorMsg("Network error while loading master audit.");
     } finally {
-      setLoading(false);
+      if (activeFilterAbortRef.current === controller) {
+        setLoading(false);
+      }
     }
   }
 
   function handleFilterSubmit(e: FormEvent) {
     e.preventDefault();
-    void applyFilters();
+    void applyFilters({ page: 1 });
   }
 
   function handleClearFilters() {
@@ -285,13 +369,47 @@ export default function OwnerAuditClient({
       date_from: "",
       date_to: "",
       search: "",
+      page: 1,
     });
   }
 
-  function openReviewModal(entry: AuditEntryItem) {
+  async function openReviewModal(entry: AuditEntryItem) {
     setReviewError(null);
     setReviewNotesInput(entry.review_notes ?? "");
+
+    const cached = hydratedEntryCacheRef.current.get(entry.id);
+    if (cached) {
+      setReviewEntry(cached);
+      setReviewAttachmentsLoading(false);
+      return;
+    }
+
     setReviewEntry(entry);
+    if (entry.attachments_loaded) {
+      hydratedEntryCacheRef.current.set(entry.id, entry);
+      setReviewAttachmentsLoading(false);
+      return;
+    }
+
+    setReviewAttachmentsLoading(true);
+    try {
+      const res = await fetch(`/api/owner/entries/${entry.id}`, {
+        cache: "no-store",
+      });
+      const payload = (await res.json()) as { entry?: AuditEntryItem };
+      if (res.ok && payload.entry) {
+        const hydrated = payload.entry;
+        hydratedEntryCacheRef.current.set(entry.id, hydrated);
+        setReviewEntry((current) =>
+          current && current.id === entry.id ? hydrated : current
+        );
+        setEntries((prev) =>
+          prev.map((item) => (item.id === entry.id ? hydrated : item))
+        );
+      }
+    } finally {
+      setReviewAttachmentsLoading(false);
+    }
   }
 
   async function handleSubmitReview(action: "approve" | "flag") {
@@ -324,8 +442,9 @@ export default function OwnerAuditClient({
         return;
       }
 
+      hydratedEntryCacheRef.current.delete(reviewEntry.id);
       setReviewEntry(null);
-      await applyFilters();
+      await applyFilters({ page });
     } catch {
       setReviewError("Network error while submitting review.");
     } finally {
@@ -359,12 +478,12 @@ export default function OwnerAuditClient({
     Boolean(editModal) &&
     (!Number.isInteger(parsedEditEntryNo) ||
       parsedEditEntryNo < 1 ||
-      parsedEditEntryNo > 500);
+      parsedEditEntryNo > 525);
   const isEditPageOutOfRange =
     Boolean(editModal) &&
     (!Number.isInteger(parsedEditPageNo) ||
-      parsedEditPageNo < 1 ||
-      parsedEditPageNo > 100);
+      parsedEditPageNo < 2 ||
+      parsedEditPageNo > 106);
 
   async function handleSaveOwnerEdit(e: FormEvent) {
     e.preventDefault();
@@ -376,14 +495,12 @@ export default function OwnerAuditClient({
     }
 
     if (isEditEntryOutOfRange) {
-      setEditError(
-        "Entry No. must be between 1 and 500. This Notarial Book has a maximum capacity of 500 entries."
-      );
+      setEditError("Entry No. must be between 1 and 525.");
       return;
     }
 
     if (isEditPageOutOfRange) {
-      setEditError("Page No. must be an integer between 1 and 100.");
+      setEditError("Page No. must be between 2 and 106.");
       return;
     }
 
@@ -419,8 +536,9 @@ export default function OwnerAuditClient({
         return;
       }
 
+      hydratedEntryCacheRef.current.delete(editModal.entry.id);
       setEditModal(null);
-      await applyFilters();
+      await applyFilters({ page });
     } catch {
       setEditError("Network error while saving changes.");
     } finally {
@@ -447,95 +565,116 @@ export default function OwnerAuditClient({
     }
   }
 
-  function handleExportExcel() {
-    const headerRow = [
-      "Branch",
-      "Book No.",
-      "Series Year",
-      "Page No.",
-      "Entry No.",
-      "Date & Time",
-      "Instrument Title",
-      "Names & Addresses of Parties",
-      "Names & Addresses of Parties (Optional)",
-      "Competent Evidence of ID",
-      "Notarial Act Type",
-      "Amount Paid (PHP)",
-      "Payment Type",
-      "Acknowledgement Receipt",
-      "Place & Remarks",
-      "Encoded By (PC)",
-    ];
+  async function handleExportExcel() {
+    setExportingExcel(true);
+    try {
+      let exportEntries = entries;
+      let exportTotals = totals;
+      if (totalCount > entries.length) {
+        const params = buildFilterParams({ page: 1, page_size: "all" });
+        const res = await fetch(`/api/owner/audit?${params.toString()}`, {
+          cache: "no-store",
+        });
+        if (res.ok) {
+          const allData = (await res.json()) as OwnerAuditResult;
+          exportEntries = allData.entries;
+          exportTotals = allData.totals;
+        }
+      }
 
-    const dataRows = entries.map((e) => [
-      e.branch_name,
-      e.book_no,
-      e.series_year,
-      e.page_no,
-      e.entry_number,
-      formatDateTime(e.notarized_at),
-      e.instrument_title,
-      e.parties,
-      e.secondary_parties ?? "",
-      e.competent_evidence_id,
-      e.notarial_act_type,
-      e.amount_paid,
-      e.payment_type === "partial" ? "Partial Payment" : "Full Amount",
-      e.acknowledgement_receipt ?? "",
-      e.place_and_remarks ?? "",
-      e.encoded_by_label,
-    ]);
+      const headerRow = [
+        "Branch",
+        "Book No.",
+        "Series Year",
+        "Page No.",
+        "Entry No.",
+        "Date & Time",
+        "Instrument Title",
+        "Names & Addresses of Parties",
+        "Names & Addresses of Parties (Optional)",
+        "Competent Evidence of ID",
+        "Notarial Act Type",
+        "Amount Paid (PHP)",
+        "Payment Type",
+        "Acknowledgement Receipt",
+        "Place & Remarks",
+        "Encoded By (PC)",
+      ];
 
-    const totalRow = [
-      "TOTAL",
-      "",
-      "",
-      "",
-      `${totals.total_entries} entries`,
-      "",
-      "",
-      "",
-      "",
-      "",
-      "",
-      totals.total_amount_paid,
-      `Full: ${totals.full_count} | Partial: ${totals.partial_count}`,
-      "",
-      "",
-      "",
-    ];
+      const dataRows = exportEntries.map((e) => [
+        e.branch_name,
+        e.book_no,
+        e.series_year,
+        e.page_no,
+        e.entry_number,
+        formatDateTime(e.notarized_at),
+        e.instrument_title,
+        e.parties,
+        e.secondary_parties ?? "",
+        e.competent_evidence_id,
+        e.notarial_act_type,
+        e.amount_paid,
+        e.payment_type === "partial" ? "Partial Payment" : "Full Amount",
+        e.acknowledgement_receipt ?? "",
+        e.place_and_remarks ?? "",
+        e.encoded_by_name
+          ? `${e.encoded_by_name} (${e.encoded_by_label})`
+          : e.encoded_by_label,
+      ]);
 
-    const worksheet = XLSX.utils.aoa_to_sheet([
-      headerRow,
-      ...dataRows,
-      [],
-      totalRow,
-    ]);
+      const totalRow = [
+        "TOTAL",
+        "",
+        "",
+        "",
+        `${exportTotals.total_entries} entries`,
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        exportTotals.total_amount_paid,
+        `Full: ${exportTotals.full_count} | Partial: ${exportTotals.partial_count}`,
+        "",
+        "",
+        "",
+      ];
 
-    worksheet["!cols"] = [
-      { wch: 18 },
-      { wch: 10 },
-      { wch: 12 },
-      { wch: 10 },
-      { wch: 10 },
-      { wch: 22 },
-      { wch: 28 },
-      { wch: 32 },
-      { wch: 32 },
-      { wch: 26 },
-      { wch: 20 },
-      { wch: 18 },
-      { wch: 18 },
-      { wch: 24 },
-      { wch: 24 },
-      { wch: 24 },
-    ];
+      const worksheet = XLSX.utils.aoa_to_sheet([
+        headerRow,
+        ...dataRows,
+        [],
+        totalRow,
+      ]);
 
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, "Master Audit");
+      worksheet["!cols"] = [
+        { wch: 18 },
+        { wch: 10 },
+        { wch: 12 },
+        { wch: 10 },
+        { wch: 10 },
+        { wch: 22 },
+        { wch: 28 },
+        { wch: 32 },
+        { wch: 32 },
+        { wch: 26 },
+        { wch: 20 },
+        { wch: 18 },
+        { wch: 18 },
+        { wch: 24 },
+        { wch: 24 },
+        { wch: 24 },
+      ];
 
-    const todayStr = new Date().toISOString().slice(0, 10);
-    XLSX.writeFile(workbook, `Notarial-Master-Audit-${todayStr}.xlsx`);
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, "Master Audit");
+
+      const todayStr = new Date().toISOString().slice(0, 10);
+      XLSX.writeFile(workbook, `Notarial-Master-Audit-${todayStr}.xlsx`);
+    } finally {
+      setExportingExcel(false);
+    }
   }
 
   const printQuery = new URLSearchParams();
@@ -573,12 +712,12 @@ export default function OwnerAuditClient({
 
           <button
             type="button"
-            onClick={handleExportExcel}
-            disabled={entries.length === 0}
+            onClick={() => void handleExportExcel()}
+            disabled={totalCount === 0 || exportingExcel}
             className="inline-flex min-h-[44px] w-full items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
           >
             <FileSpreadsheet className="h-4 w-4" />
-            Export Excel (.xlsx)
+            {exportingExcel ? "Exporting..." : "Export Excel (.xlsx)"}
           </button>
         </div>
       </div>
@@ -802,9 +941,11 @@ export default function OwnerAuditClient({
 
       {/* Mobile Stacked Entry Cards (< 768px Cover Screen) */}
       <div className="space-y-3 md:hidden">
-        {entries.length === 0 ? (
+        {loading ? (
+          <EntryListSkeleton rows={4} />
+        ) : entries.length === 0 ? (
           <div className="rounded-xl border border-slate-200 bg-white px-4 py-10 text-center text-sm text-slate-500 shadow-xs">
-            {loading ? "Loading entries..." : "No entries match your filters."}
+            No entries match your filters.
           </div>
         ) : (
             entries.map((entry) => (
@@ -889,10 +1030,17 @@ export default function OwnerAuditClient({
                       </span>
                     )}
                   </div>
-                  <span className="inline-flex items-center gap-1 rounded bg-slate-100 px-2 py-0.5 font-medium text-slate-700">
-                    <Monitor className="h-3 w-3 text-slate-500" />
-                    {entry.encoded_by_label}
-                  </span>
+                  <div className="flex flex-col items-end gap-1">
+                    {entry.encoded_by_name && (
+                      <span className="inline-flex items-center rounded-full border border-[#DFD7C8] bg-[#FAF7F1] px-2.5 py-0.5 font-semibold text-[#1B2A4A]">
+                        {entry.encoded_by_name}
+                      </span>
+                    )}
+                    <span className="inline-flex items-center gap-1 rounded bg-slate-100 px-2 py-0.5 font-medium text-slate-700">
+                      <Monitor className="h-3 w-3 text-slate-500" />
+                      {entry.encoded_by_label}
+                    </span>
+                  </div>
                 </div>
 
                 {entry.review_notes && (
@@ -959,15 +1107,15 @@ export default function OwnerAuditClient({
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {entries.length === 0 ? (
+            {loading ? (
+              <TableRowsSkeleton rows={8} columns={9} />
+            ) : entries.length === 0 ? (
               <tr>
                 <td
                   colSpan={9}
                   className="px-4 py-10 text-center text-slate-500"
                 >
-                  {loading
-                    ? "Loading entries..."
-                    : "No entries match your filters."}
+                  No entries match your filters.
                 </td>
               </tr>
             ) : (
@@ -1058,10 +1206,17 @@ export default function OwnerAuditClient({
                     </div>
                   </td>
                   <td className="whitespace-nowrap px-4 py-3 text-xs text-slate-600">
-                    <span className="inline-flex items-center gap-1 rounded bg-slate-100 px-2 py-0.5 font-medium text-slate-700">
-                      <Monitor className="h-3 w-3 text-slate-500" />
-                      {entry.encoded_by_label}
-                    </span>
+                    <div className="flex flex-col items-start gap-1">
+                      {entry.encoded_by_name && (
+                        <span className="font-semibold text-[#1B2A4A]">
+                          {entry.encoded_by_name}
+                        </span>
+                      )}
+                      <span className="inline-flex items-center gap-1 rounded bg-slate-100 px-2 py-0.5 font-medium text-slate-700">
+                        <Monitor className="h-3 w-3 text-slate-500" />
+                        {entry.encoded_by_label}
+                      </span>
+                    </div>
                   </td>
                   <td className="whitespace-nowrap px-4 py-3 text-right">
                     <div className="inline-flex items-center gap-1.5">
@@ -1097,6 +1252,48 @@ export default function OwnerAuditClient({
           </tbody>
         </table>
       </div>
+
+      {/* Pagination Bar */}
+      {totalCount > 0 && (
+        <div className="flex flex-col items-center justify-between gap-3 rounded-xl border border-[#DFD7C8] bg-white px-4 py-3 text-xs text-slate-600 shadow-xs sm:flex-row">
+          <div className="font-mono tabular-nums">
+            Showing{" "}
+            <strong className="text-[#1B2A4A]">
+              {(page - 1) * pageSize + 1}
+            </strong>
+            –
+            <strong className="text-[#1B2A4A]">
+              {Math.min(page * pageSize, totalCount)}
+            </strong>{" "}
+            of <strong className="text-[#1B2A4A]">{totalCount}</strong>{" "}
+            filtered entries
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              disabled={loading || page <= 1}
+              onClick={() => void applyFilters({ page: page - 1 })}
+              className="inline-flex min-h-[44px] items-center gap-1 rounded-lg border border-[#DFD7C8] bg-[#FAF7F1] px-3 py-1.5 text-xs font-semibold text-[#1B2A4A] transition hover:bg-[#F4EFE4] disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              <ChevronLeft className="h-4 w-4" />
+              Previous
+            </button>
+            <span className="px-2 font-mono text-xs font-semibold tabular-nums text-[#1B2A4A]">
+              Page {page} of {totalPages}
+            </span>
+            <button
+              type="button"
+              disabled={loading || page >= totalPages}
+              onClick={() => void applyFilters({ page: page + 1 })}
+              className="inline-flex min-h-[44px] items-center gap-1 rounded-lg border border-[#DFD7C8] bg-[#FAF7F1] px-3 py-1.5 text-xs font-semibold text-[#1B2A4A] transition hover:bg-[#F4EFE4] disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              Next
+              <ChevronRight className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Side-by-Side Lawyer Review Modal */}
       {reviewEntry && (
@@ -1149,12 +1346,19 @@ export default function OwnerAuditClient({
                 <div className="flex items-center justify-between">
                   <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-600">
                     Scanned Instrument &amp; IDs (
-                    {reviewEntry.attachments?.length ?? 0})
+                    {reviewAttachmentsLoading
+                      ? "…"
+                      : (reviewEntry.attachments?.length ?? 0)}
+                    )
                   </h3>
                 </div>
-                <AttachmentViewerPane
-                  attachments={reviewEntry.attachments ?? []}
-                />
+                {reviewAttachmentsLoading ? (
+                  <AttachmentSkeleton />
+                ) : (
+                  <AttachmentViewerPane
+                    attachments={reviewEntry.attachments ?? []}
+                  />
+                )}
               </div>
 
               {/* Right Column: Encoded Register Fields + Review Decision */}
@@ -1237,8 +1441,15 @@ export default function OwnerAuditClient({
                     <dt className="text-xs font-semibold uppercase text-slate-500">
                       Encoded By
                     </dt>
-                    <dd className="text-slate-800">
-                      {reviewEntry.encoded_by_label}
+                    <dd className="space-y-0.5 text-slate-800">
+                      {reviewEntry.encoded_by_name && (
+                        <div className="font-semibold text-[#1B2A4A]">
+                          {reviewEntry.encoded_by_name}
+                        </div>
+                      )}
+                      <div className="text-xs text-slate-600">
+                        {reviewEntry.encoded_by_label}
+                      </div>
                     </dd>
                   </div>
                   {reviewEntry.reviewed_at && (
@@ -1383,12 +1594,12 @@ export default function OwnerAuditClient({
               <div className="grid gap-3 sm:grid-cols-4">
                 <div>
                   <label className="mb-1 block text-xs font-semibold uppercase text-slate-600">
-                    Entry No. (1&ndash;500)
+                    Entry No. (1&ndash;525)
                   </label>
                   <input
                     type="number"
                     min={1}
-                    max={500}
+                    max={525}
                     step={1}
                     required
                     value={editModal.entry_number}
@@ -1399,8 +1610,13 @@ export default function OwnerAuditClient({
                         ...editModal,
                         entry_number: raw,
                         page_no:
-                          Number.isInteger(num) && num >= 1 && num <= 500
-                            ? String(Math.min(100, Math.ceil(num / 5)))
+                          Number.isInteger(num) && num >= 1 && num <= 525
+                            ? String(
+                                Math.min(
+                                  106,
+                                  Math.max(2, Math.ceil(num / 5) + 1)
+                                )
+                              )
                             : editModal.page_no,
                       });
                     }}
@@ -1415,18 +1631,18 @@ export default function OwnerAuditClient({
                       role="alert"
                       className="mt-1 text-xs font-medium text-red-700"
                     >
-                      Entry No. cannot exceed 500 per book.
+                      Entry No. cannot exceed 525 per book.
                     </p>
                   )}
                 </div>
                 <div>
                   <label className="mb-1 block text-xs font-semibold uppercase text-slate-600">
-                    Page No. (1&ndash;100)
+                    Page No. (2&ndash;106)
                   </label>
                   <input
                     type="number"
-                    min={1}
-                    max={100}
+                    min={2}
+                    max={106}
                     step={1}
                     required
                     value={editModal.page_no}
@@ -1447,7 +1663,7 @@ export default function OwnerAuditClient({
                       role="alert"
                       className="mt-1 text-xs font-medium text-red-700"
                     >
-                      Page No. must be between 1 and 100.
+                      Page No. must be between 2 and 106.
                     </p>
                   )}
                 </div>

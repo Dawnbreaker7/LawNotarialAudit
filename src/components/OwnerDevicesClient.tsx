@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import {
   Check,
   CheckCircle2,
@@ -37,14 +37,16 @@ function getBranchLabel(branch: PublicBranch): string {
   return branch.branch_name;
 }
 
+const DEVICE_DATETIME_FORMATTER = new Intl.DateTimeFormat("en-PH", {
+  dateStyle: "medium",
+  timeStyle: "short",
+});
+
 function formatDateTime(iso: string | null): string {
   if (!iso) return "—";
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return iso;
-  return date.toLocaleString("en-PH", {
-    dateStyle: "medium",
-    timeStyle: "short",
-  });
+  return DEVICE_DATETIME_FORMATTER.format(date);
 }
 
 function DeviceTypeBadge({ type }: { type: DeviceType }) {
@@ -92,8 +94,14 @@ export default function OwnerDevicesClient({
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  const branchById = new Map(branches.map((b) => [b.id, b]));
-  const deviceById = new Map(devices.map((d) => [d.id, d]));
+  const branchById = useMemo(
+    () => new Map(branches.map((b) => [b.id, b])),
+    [branches]
+  );
+  const deviceById = useMemo(
+    () => new Map(devices.map((d) => [d.id, d])),
+    [devices]
+  );
 
   async function refreshSnapshot() {
     setBusyKey("refresh");

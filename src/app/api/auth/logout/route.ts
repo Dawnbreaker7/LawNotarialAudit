@@ -6,6 +6,8 @@ import {
   SESSION_COOKIE_NAME,
 } from "@/lib/auth/crypto";
 
+export const preferredRegion = "sin1";
+
 export async function POST(request: NextRequest) {
   const rawSessionToken = request.cookies.get(SESSION_COOKIE_NAME)?.value;
 

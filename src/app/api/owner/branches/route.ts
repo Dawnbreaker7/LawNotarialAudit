@@ -7,6 +7,8 @@ import { fetchOwnerBranchesSnapshot } from "@/lib/owner/branches";
 
 const BCRYPT_ROUNDS = 12;
 
+export const preferredRegion = "sin1";
+
 export async function GET() {
   try {
     const auth = await requireApprovedOwnerApi();

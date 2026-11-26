@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireApprovedOwnerApi } from "@/lib/owner/auth";
 import { queryOwnerLogs } from "@/lib/owner/audit";
 
+export const preferredRegion = "sin1";
+
 export async function GET(request: NextRequest) {
   try {
     const auth = await requireApprovedOwnerApi();

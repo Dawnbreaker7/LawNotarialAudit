@@ -6,6 +6,8 @@ import type { EntryAttachment, PaymentType, ReviewStatus } from "@/types/databas
 const ENTRY_SELECT =
   "id, book_id, branch_id, page_no, entry_number, instrument_title, parties, secondary_parties, competent_evidence_id, notarized_at, notarial_act_type, amount_paid, payment_type, acknowledgement_receipt, place_and_remarks, review_status, reviewed_at, review_notes, attachments, created_by_session_id, created_at, updated_at";
 
+export const preferredRegion = "sin1";
+
 export async function PATCH(
   request: Request,
   context: { params: Promise<{ id: string }> }

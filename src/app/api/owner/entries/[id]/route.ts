@@ -1,10 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { requireApprovedOwnerApi } from "@/lib/owner/auth";
+import { queryOwnerEntryById } from "@/lib/owner/audit";
 import {
-  calculatePageNo,
+  getPageForEntry,
   MAX_ENTRY_NUMBER,
   MAX_PAGE_NO,
+  MIN_PAGE_NO,
 } from "@/lib/branch/register";
 import type {
   EntryAttachment,
@@ -20,6 +22,8 @@ const ALLOWED_ACT_TYPES = new Set([
   "Signature Witnessing",
 ]);
 
+export const preferredRegion = "sin1";
+
 function parseNonNegative(value: unknown): number | null {
   if (typeof value === "number") {
     return Number.isFinite(value) && value >= 0 ? value : null;
@@ -29,6 +33,37 @@ function parseNonNegative(value: unknown): number | null {
     return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
   }
   return null;
+}
+
+export async function GET(
+  _request: NextRequest,
+  context: { params: Promise<{ id: string }> }
+) {
+  try {
+    const auth = await requireApprovedOwnerApi();
+    if (auth.error) return auth.error;
+
+    const { id } = await context.params;
+    if (!id) {
+      return NextResponse.json(
+        { error: "Entry ID is required." },
+        { status: 400 }
+      );
+    }
+
+    const entry = await queryOwnerEntryById(id);
+    if (!entry) {
+      return NextResponse.json({ error: "Entry not found." }, { status: 404 });
+    }
+
+    return NextResponse.json({ entry });
+  } catch (err) {
+    console.error("GET /api/owner/entries/[id] failed:", err);
+    return NextResponse.json(
+      { error: "Failed to load notarial entry details." },
+      { status: 500 }
+    );
+  }
 }
 
 export async function PATCH(
@@ -179,8 +214,7 @@ export async function PATCH(
       ) {
         return NextResponse.json(
           {
-            error:
-              "Entry No. must be between 1 and 500. This Notarial Book has a maximum capacity of 500 entries.",
+            error: "Entry No. must be between 1 and 525.",
           },
           { status: 400 }
         );
@@ -205,7 +239,7 @@ export async function PATCH(
       }
     }
 
-    let pageNo = calculatePageNo(entryNumber);
+    let pageNo = getPageForEntry(entryNumber);
     if (
       body.page_no !== undefined &&
       body.page_no !== null &&
@@ -214,19 +248,23 @@ export async function PATCH(
       const parsedPage = Number(body.page_no);
       if (
         !Number.isInteger(parsedPage) ||
-        parsedPage < 1 ||
+        parsedPage < MIN_PAGE_NO ||
         parsedPage > MAX_PAGE_NO
       ) {
         return NextResponse.json(
-          { error: "Page No. must be an integer between 1 and 100." },
+          { error: "Page No. must be between 2 and 106." },
           { status: 400 }
         );
       }
       pageNo = parsedPage;
     }
-    if (!Number.isInteger(pageNo) || pageNo < 1 || pageNo > MAX_PAGE_NO) {
+    if (
+      !Number.isInteger(pageNo) ||
+      pageNo < MIN_PAGE_NO ||
+      pageNo > MAX_PAGE_NO
+    ) {
       return NextResponse.json(
-        { error: "Page No. must be an integer between 1 and 100." },
+        { error: "Page No. must be between 2 and 106." },
         { status: 400 }
       );
     }

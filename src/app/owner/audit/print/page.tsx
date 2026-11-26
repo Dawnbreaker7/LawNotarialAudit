@@ -13,7 +13,7 @@ export default async function OwnerAuditPrintPage({
   searchParams,
 }: OwnerAuditPrintPageProps) {
   const valid = await getValidSession({ touchLastSeen: false });
-  if (!valid || !valid.device?.is_approved || valid.branch.role !== "owner") {
+  if (!valid || valid.branch.role !== "owner") {
     redirect("/login");
   }
 
@@ -21,7 +21,7 @@ export default async function OwnerAuditPrintPage({
   const initialBranchCode =
     params.branch_code === "MALUNGON" ? "MALUNGON" : "GENSAN";
 
-  const auditData = await queryOwnerAuditData();
+  const auditData = await queryOwnerAuditData({ page_size: "all" });
 
   return (
     <OwnerPrintClient

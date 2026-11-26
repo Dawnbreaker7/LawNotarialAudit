@@ -202,7 +202,13 @@ export default function OwnerBooksClient({
         setErrorMsg(data.error ?? "Failed to activate book.");
         return;
       }
-      await refreshBooks();
+      setBooks((prev) =>
+        prev.map((item) =>
+          item.branch_code === book.branch_code
+            ? { ...item, is_active: item.id === book.id }
+            : item
+        )
+      );
       setSuccessMsg(
         `Book ${book.book_no} (Series of ${book.series_year}) is now active for ${book.branch_name}.`
       );
@@ -308,13 +314,25 @@ export default function OwnerBooksClient({
                             </span>
                           )}
                           <span className="rounded-full border border-[#DFD7C8] bg-[#FAF7F1] px-2.5 py-0.5 font-mono text-xs tabular-nums text-slate-700">
-                            {book.entry_count} / 500 entries
+                            {book.entry_count} / 525 entries (Pages 2&ndash;106)
                           </span>
-                          {book.entry_count >= 500 && (
+                          {book.entry_count >= 525 && (
                             <span className="rounded-full border border-red-300 bg-[#FEF2F2] px-2.5 py-0.5 text-xs font-semibold text-[#7F1D1D]">
-                              Full (500/500)
+                              Full (525/525)
                             </span>
                           )}
+                        </div>
+                        <div className="mt-1.5 h-2 w-full max-w-xs overflow-hidden rounded-full bg-[#EAE3D5]">
+                          <div
+                            className={`h-full rounded-full transition-all ${
+                              book.entry_count >= 525
+                                ? "bg-[#991B1B]"
+                                : "bg-[#1B2A4A]"
+                            }`}
+                            style={{
+                              width: `${Math.min(100, Math.round((book.entry_count / 525) * 100))}%`,
+                            }}
+                          />
                         </div>
                         <div className="text-sm text-slate-700">
                           <strong>Notary Public:</strong> {book.notary_name} &bull;{" "}

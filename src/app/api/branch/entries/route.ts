@@ -6,11 +6,12 @@ import {
   getValidSession,
 } from "@/lib/auth/session";
 import {
-  calculatePageNo,
   getActiveBranchBook,
+  getPageForEntry,
   getUsedEntryNumbersForBook,
   MAX_ENTRY_NUMBER,
   MAX_PAGE_NO,
+  MIN_PAGE_NO,
 } from "@/lib/branch/register";
 import type {
   EntryAttachment,
@@ -25,6 +26,8 @@ const ALLOWED_ACT_TYPES = new Set([
   "Copy Certification",
   "Signature Witnessing",
 ]);
+
+export const preferredRegion = "sin1";
 
 function parseNonNegativeAmount(value: unknown): number | null {
   if (typeof value === "number") {
@@ -145,8 +148,19 @@ export async function POST(request: NextRequest) {
 
     const supabase = createAdminClient();
     const branchDisplayName = getBranchDisplayName(valid.branch);
+    const lockToken =
+      typeof body.lock_token === "string" && body.lock_token.trim() !== ""
+        ? body.lock_token.trim()
+        : typeof body.lockToken === "string" && body.lockToken.trim() !== ""
+          ? body.lockToken.trim()
+          : valid.session.id;
+
     const { usedEntryNumbers, nextAvailableEntryNumber } =
-      await getUsedEntryNumbersForBook(valid.branch.id, activeBook.id);
+      await getUsedEntryNumbersForBook(
+        valid.branch.id,
+        activeBook.id,
+        lockToken
+      );
     const usedSet = new Set(usedEntryNumbers);
 
     let entryNumber: number;
@@ -163,8 +177,7 @@ export async function POST(request: NextRequest) {
       ) {
         return NextResponse.json(
           {
-            error:
-              "Entry No. must be between 1 and 500. This Notarial Book has a maximum capacity of 500 entries.",
+            error: "Entry No. must be between 1 and 525.",
           },
           { status: 400 }
         );
@@ -174,8 +187,7 @@ export async function POST(request: NextRequest) {
       if (nextAvailableEntryNumber === null) {
         return NextResponse.json(
           {
-            error:
-              "Entry No. must be between 1 and 500. This Notarial Book has a maximum capacity of 500 entries.",
+            error: "Entry No. must be between 1 and 525.",
           },
           { status: 400 }
         );
@@ -193,7 +205,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    let pageNo = calculatePageNo(entryNumber);
+    let pageNo = getPageForEntry(entryNumber);
     if (
       body.page_no !== undefined &&
       body.page_no !== null &&
@@ -202,19 +214,23 @@ export async function POST(request: NextRequest) {
       const parsedPage = Number(body.page_no);
       if (
         !Number.isInteger(parsedPage) ||
-        parsedPage < 1 ||
+        parsedPage < MIN_PAGE_NO ||
         parsedPage > MAX_PAGE_NO
       ) {
         return NextResponse.json(
-          { error: "Page No. must be an integer between 1 and 100." },
+          { error: "Page No. must be between 2 and 106." },
           { status: 400 }
         );
       }
       pageNo = parsedPage;
     }
-    if (!Number.isInteger(pageNo) || pageNo < 1 || pageNo > MAX_PAGE_NO) {
+    if (
+      !Number.isInteger(pageNo) ||
+      pageNo < MIN_PAGE_NO ||
+      pageNo > MAX_PAGE_NO
+    ) {
       return NextResponse.json(
-        { error: "Page No. must be an integer between 1 and 100." },
+        { error: "Page No. must be between 2 and 106." },
         { status: 400 }
       );
     }
@@ -276,7 +292,47 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Strictly bind branch_id, book_id, and created_by_session_id from server session.
+    // Verify or acquire the live entry_number_lock before persisting the record.
+    const lockUserId = valid.branch_user_id ?? null;
+    const lockUserName =
+      valid.staff_name || branchDisplayName || "Branch Staff";
+    const { data: lockRpcResult, error: lockAcquireError } = await supabase.rpc(
+      "acquire_entry_lock",
+      {
+        p_book_id: activeBook.id,
+        p_branch_id: valid.branch.id,
+        p_entry_number: entryNumber,
+        p_user_id: lockUserId,
+        p_user_name: lockUserName,
+        p_session_token: lockToken,
+        p_ttl_seconds: 120,
+      }
+    );
+
+    if (lockAcquireError) {
+      throw new Error(lockAcquireError.message);
+    }
+
+    const lockResult = Array.isArray(lockRpcResult)
+      ? lockRpcResult[0]
+      : lockRpcResult;
+    if (!lockResult?.acquired) {
+      const lockedByName =
+        typeof lockResult?.locked_by_name === "string" &&
+        lockResult.locked_by_name
+          ? lockResult.locked_by_name
+          : "another user";
+      return NextResponse.json(
+        {
+          error: `Cannot save: Entry #${entryNumber} is currently being used by ${lockedByName}.`,
+          locked_by_name: lockedByName,
+          nextAvailableEntryNumber,
+        },
+        { status: 423 }
+      );
+    }
+
+    // Strictly bind branch_id, book_id, created_by_session_id, and staff identity from server session.
     const { data: createdEntry, error: insertError } = await supabase
       .from("notarial_entries")
       .insert({
@@ -300,9 +356,11 @@ export async function POST(request: NextRequest) {
         review_notes: null,
         attachments: sanitizedAttachments,
         created_by_session_id: valid.session.id,
+        encoded_by_user_id: valid.branch_user_id,
+        encoded_by_name: valid.staff_name,
       })
       .select(
-        "id, book_id, branch_id, page_no, entry_number, instrument_title, parties, secondary_parties, competent_evidence_id, notarized_at, notarial_act_type, amount_paid, payment_type, acknowledgement_receipt, place_and_remarks, review_status, reviewed_at, review_notes, attachments, created_by_session_id, created_at, updated_at"
+        "id, book_id, branch_id, page_no, entry_number, instrument_title, parties, secondary_parties, competent_evidence_id, notarized_at, notarial_act_type, amount_paid, payment_type, acknowledgement_receipt, place_and_remarks, review_status, reviewed_at, review_notes, attachments, created_by_session_id, encoded_by_user_id, encoded_by_name, created_at, updated_at"
       )
       .single();
 
@@ -310,7 +368,8 @@ export async function POST(request: NextRequest) {
       if (insertError?.code === "23505") {
         const latest = await getUsedEntryNumbersForBook(
           valid.branch.id,
-          activeBook.id
+          activeBook.id,
+          lockToken
         );
         return NextResponse.json(
           {
@@ -321,6 +380,23 @@ export async function POST(request: NextRequest) {
         );
       }
       throw new Error(insertError?.message ?? "Failed to save entry.");
+    }
+
+    // Release the live entry lock immediately once the permanent entry row is committed.
+    const { error: releaseLockError } = await supabase.rpc(
+      "release_entry_lock",
+      {
+        p_book_id: activeBook.id,
+        p_entry_number: entryNumber,
+        p_user_id: lockUserId,
+        p_session_token: lockToken,
+      }
+    );
+    if (releaseLockError) {
+      console.warn(
+        "Non-fatal warning releasing entry_number_lock after save:",
+        releaseLockError.message
+      );
     }
 
     const normalizedEntry = {
@@ -340,7 +416,8 @@ export async function POST(request: NextRequest) {
     };
 
     const nextBookPageNo = Math.max(
-      activeBook.current_page_no || 1,
+      MIN_PAGE_NO,
+      activeBook.current_page_no || MIN_PAGE_NO,
       Number(pageNo)
     );
     if ("current_page_no" in activeBook) {

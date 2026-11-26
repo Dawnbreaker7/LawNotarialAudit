@@ -27,7 +27,9 @@ export async function fetchOwnerBooksSnapshot(): Promise<{
       .in("branch_code", ["GENSAN", "MALUNGON"]),
     supabase
       .from("notarial_books")
-      .select("*")
+      .select(
+        "id, branch_id, notary_name, jurisdiction, appointment_date, commission_expiry, book_no, series_year, is_active"
+      )
       .order("is_active", { ascending: false })
       .order("series_year", { ascending: false })
       .order("book_no", { ascending: false }),

@@ -7,6 +7,8 @@ import type { EntryAttachment } from "@/types/database";
 
 const BUCKET_NAME = "notarial-attachments";
 const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024; // 10MB
+
+export const preferredRegion = "sin1";
 const ALLOWED_MIME_TYPES = new Set([
   "image/jpeg",
   "image/png",

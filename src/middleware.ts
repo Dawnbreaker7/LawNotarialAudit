@@ -59,7 +59,7 @@ export async function middleware(request: NextRequest) {
 
   const { data: sessionRow } = await supabase
     .from("device_sessions")
-    .select("id, branch_id, device_id")
+    .select("id, branch_id, device_id, branch_user_id")
     .eq("session_token_hash", tokenHash)
     .eq("is_active", true)
     .is("revoked_at", null)
@@ -80,7 +80,7 @@ export async function middleware(request: NextRequest) {
     return redirectClearingSession(request, "/login?reason=revoked");
   }
 
-  const [{ data: branchRow }, deviceResult] = await Promise.all([
+  const [{ data: branchRow }, deviceResult, staffResult] = await Promise.all([
     supabase
       .from("branches")
       .select("role, is_dev")
@@ -93,9 +93,34 @@ export async function middleware(request: NextRequest) {
           .eq("id", sessionRow.device_id)
           .maybeSingle()
       : Promise.resolve({ data: null }),
+    sessionRow.branch_user_id
+      ? supabase
+          .from("branch_users")
+          .select("is_active")
+          .eq("id", sessionRow.branch_user_id)
+          .maybeSingle()
+      : Promise.resolve({ data: null }),
   ]);
 
   if (!branchRow) {
+    return redirectClearingSession(request, "/login?reason=revoked");
+  }
+
+  if (
+    sessionRow.branch_user_id &&
+    (!staffResult.data || !staffResult.data.is_active)
+  ) {
+    if (pathname === "/login") {
+      const response = NextResponse.next();
+      response.cookies.set(SESSION_COOKIE_NAME, "", {
+        httpOnly: true,
+        sameSite: "lax",
+        secure: process.env.NODE_ENV === "production",
+        path: "/",
+        maxAge: 0,
+      });
+      return response;
+    }
     return redirectClearingSession(request, "/login?reason=revoked");
   }
 

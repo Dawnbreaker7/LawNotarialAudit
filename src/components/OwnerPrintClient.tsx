@@ -54,7 +54,7 @@ export default function OwnerPrintClient({
 
   const pages = useMemo(() => {
     if (!activeBook) {
-      return [{ pageNo: 1, entries: [] as AuditEntryItem[] }];
+      return [{ pageNo: 2, entries: [] as AuditEntryItem[] }];
     }
 
     const bookEntries = entries
@@ -63,13 +63,14 @@ export default function OwnerPrintClient({
 
     const byPage = new Map<number, AuditEntryItem[]>();
     for (const entry of bookEntries) {
+      if (entry.page_no < 2 || entry.page_no > 106) continue;
       const list = byPage.get(entry.page_no) ?? [];
       list.push(entry);
       byPage.set(entry.page_no, list);
     }
 
     if (byPage.size === 0) {
-      byPage.set(1, []);
+      byPage.set(2, []);
     }
 
     return Array.from(byPage.entries())
@@ -202,8 +203,8 @@ export default function OwnerPrintClient({
             >
               <option value="all">All Pages ({pages.length})</option>
               {pages.map((p) => {
-                const first = (p.pageNo - 1) * ENTRIES_PER_PAGE + 1;
-                const last = p.pageNo * ENTRIES_PER_PAGE;
+                const first = (p.pageNo - 2) * ENTRIES_PER_PAGE + 1;
+                const last = (p.pageNo - 1) * ENTRIES_PER_PAGE;
                 return (
                   <option key={p.pageNo} value={String(p.pageNo)}>
                     Page {p.pageNo} (Entries {first}&ndash;{last})

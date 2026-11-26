@@ -33,7 +33,12 @@ export type AuditAction =
   | "DEVICE_REVOKED"
   | "BOOK_CREATED"
   | "BOOK_UPDATED"
-  | "BRANCH_UPDATED";
+  | "BRANCH_UPDATED"
+  | "STAFF_ACCOUNT_CREATED"
+  | "STAFF_ACCESS_REVOKED"
+  | "STAFF_ACCESS_RESTORED"
+  | "STAFF_PASSWORD_RESET"
+  | "STAFF_ACCOUNT_DELETED";
 
 export const BRANCH_LABELS: Record<OperatingBranchCode, string> = {
   GENSAN: "GenSan Branch",
@@ -51,6 +56,17 @@ export interface Branch {
   require_device_approval: boolean;
   max_devices: number;
   created_at: string;
+}
+
+export interface BranchUser {
+  id: string;
+  branch_id: string;
+  full_name: string;
+  username: string;
+  password_hash: string;
+  is_active: boolean;
+  created_at: string;
+  revoked_at: string | null;
 }
 
 export interface NotarialBook {
@@ -90,6 +106,8 @@ export interface NotarialEntry {
   review_notes: string | null;
   attachments: EntryAttachment[];
   created_by_session_id: string | null;
+  encoded_by_user_id?: string | null;
+  encoded_by_name?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -111,6 +129,7 @@ export interface DeviceSession {
   id: string;
   branch_id: string;
   device_id: string | null;
+  branch_user_id: string | null;
   session_token_hash: string;
   device_type: DeviceType;
   os_info: string | null;
@@ -121,6 +140,17 @@ export interface DeviceSession {
   revoked_by: string | null;
   last_seen_at: string;
   created_at: string;
+}
+
+export interface EntryNumberLock {
+  book_id: string;
+  branch_id: string;
+  entry_number: number;
+  locked_by_user_id: string | null;
+  locked_by_name: string;
+  lock_session_token: string;
+  locked_at: string;
+  expires_at: string;
 }
 
 export interface AuditLog {
@@ -186,10 +216,21 @@ export interface Database {
           | "review_notes"
           | "attachments"
           | "created_by_session_id"
+          | "encoded_by_user_id"
+          | "encoded_by_name"
           | "created_at"
           | "updated_at"
         >;
         Update: TableUpdate<NotarialEntry>;
+        Relationships: [];
+      };
+      branch_users: {
+        Row: TableRow<BranchUser>;
+        Insert: TableInsert<
+          BranchUser,
+          "id" | "is_active" | "created_at" | "revoked_at"
+        >;
+        Update: TableUpdate<BranchUser>;
         Relationships: [];
       };
       authorized_devices: {
@@ -213,6 +254,7 @@ export interface Database {
           DeviceSession,
           | "id"
           | "device_id"
+          | "branch_user_id"
           | "os_info"
           | "browser_info"
           | "ip_address"
@@ -240,9 +282,45 @@ export interface Database {
         Update: TableUpdate<AuditLog>;
         Relationships: [];
       };
+      entry_number_locks: {
+        Row: TableRow<EntryNumberLock>;
+        Insert: TableInsert<
+          EntryNumberLock,
+          "locked_by_user_id" | "locked_at"
+        >;
+        Update: TableUpdate<EntryNumberLock>;
+        Relationships: [];
+      };
     };
     Views: Record<string, never>;
-    Functions: Record<string, never>;
+    Functions: {
+      acquire_entry_lock: {
+        Args: {
+          p_book_id: string;
+          p_branch_id: string;
+          p_entry_number: number;
+          p_user_id: string | null;
+          p_user_name: string;
+          p_session_token: string;
+          p_ttl_seconds?: number;
+        };
+        Returns: {
+          acquired: boolean;
+          reason?: string | null;
+          locked_by_name: string;
+          expires_at: string;
+        };
+      };
+      release_entry_lock: {
+        Args: {
+          p_book_id: string;
+          p_entry_number: number;
+          p_user_id: string | null;
+          p_session_token: string;
+        };
+        Returns: undefined;
+      };
+    };
     Enums: Record<string, never>;
     CompositeTypes: Record<string, never>;
   };

@@ -7,7 +7,7 @@ export const dynamic = "force-dynamic";
 
 export default async function OwnerDevicesPage() {
   const valid = await getValidSession();
-  if (!valid || !valid.device?.is_approved || valid.branch.role !== "owner") {
+  if (!valid || valid.branch.role !== "owner") {
     redirect("/login");
   }
 
@@ -19,7 +19,7 @@ export default async function OwnerDevicesPage() {
       initialDevices={snapshot.devices}
       initialSessions={snapshot.activeSessions}
       currentSessionId={valid.session.id}
-      currentDeviceId={valid.device.id}
+      currentDeviceId={valid.device?.id ?? null}
     />
   );
 }

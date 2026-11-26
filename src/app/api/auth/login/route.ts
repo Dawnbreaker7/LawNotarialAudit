@@ -13,7 +13,13 @@ import {
 } from "@/lib/auth/crypto";
 import { getClientIp, parseUserAgent } from "@/lib/auth/device";
 import { getDefaultRedirect } from "@/lib/auth/session";
-import type { AuthorizedDevice, BranchCode } from "@/types/database";
+import type {
+  AuthorizedDevice,
+  Branch,
+  BranchCode,
+} from "@/types/database";
+
+export const preferredRegion = "sin1";
 
 export async function POST(request: NextRequest) {
   try {
@@ -22,12 +28,12 @@ export async function POST(request: NextRequest) {
       password?: unknown;
     } | null;
 
-    // Preserve exact case for mixed-case owner usernames like "Bong@29".
-    const branchCode =
+    // Preserve exact case with .trim() only for mixed-case owner/staff usernames.
+    const identifier =
       typeof body?.branch_code === "string" ? body.branch_code.trim() : "";
     const password = typeof body?.password === "string" ? body.password : "";
 
-    if (!branchCode || !password) {
+    if (!identifier || !password) {
       return NextResponse.json(
         { error: "Username / branch code and password are required." },
         { status: 400 }
@@ -36,25 +42,118 @@ export async function POST(request: NextRequest) {
 
     const supabase = createAdminClient();
 
-    const { data: branch, error: branchError } = await supabase
+    let branch: Branch | null = null;
+    let matchedStaffUser: {
+      id: string;
+      branch_id: string;
+      full_name: string;
+      username: string;
+      password_hash: string;
+      is_active: boolean;
+    } | null = null;
+
+    // 1. Check owner accounts first ("Bong@29", "DEV") — never blocked by device-token gates.
+    const { data: ownerBranch, error: ownerBranchError } = await supabase
       .from("branches")
       .select("*")
-      .eq("branch_code", branchCode as BranchCode)
+      .eq("branch_code", identifier as BranchCode)
+      .eq("role", "owner")
       .maybeSingle();
 
-    if (branchError || !branch) {
-      return NextResponse.json(
-        { error: "Invalid username / branch code or password." },
-        { status: 401 }
-      );
+    if (ownerBranchError) {
+      throw new Error(ownerBranchError.message);
     }
 
-    const isPasswordValid = await verifyPassword(password, branch.password_hash);
-    if (!isPasswordValid) {
-      return NextResponse.json(
-        { error: "Invalid username / branch code or password." },
-        { status: 401 }
+    if (ownerBranch) {
+      const isPasswordValid = await verifyPassword(
+        password,
+        ownerBranch.password_hash
       );
+      if (!isPasswordValid) {
+        return NextResponse.json(
+          { error: "Invalid username / branch code or password." },
+          { status: 401 }
+        );
+      }
+      branch = ownerBranch;
+    } else {
+      // 2. Check individual per-branch staff accounts (branch_users).
+      const { data: staffUser, error: staffError } = await supabase
+        .from("branch_users")
+        .select("id, branch_id, full_name, username, password_hash, is_active")
+        .eq("username", identifier)
+        .maybeSingle();
+
+      if (staffError && staffError.code !== "42501") {
+        throw new Error(staffError.message);
+      }
+
+      if (staffUser) {
+        if (!staffUser.is_active) {
+          return NextResponse.json(
+            {
+              error:
+                "Access revoked. This account has been deactivated by the Owner.",
+            },
+            { status: 403 }
+          );
+        }
+
+        const isStaffPasswordValid = await verifyPassword(
+          password,
+          staffUser.password_hash
+        );
+        if (!isStaffPasswordValid) {
+          return NextResponse.json(
+            { error: "Invalid username / branch code or password." },
+            { status: 401 }
+          );
+        }
+
+        const { data: assignedBranch, error: assignedBranchError } =
+          await supabase
+            .from("branches")
+            .select("*")
+            .eq("id", staffUser.branch_id)
+            .maybeSingle();
+
+        if (assignedBranchError || !assignedBranch) {
+          return NextResponse.json(
+            { error: "Invalid username / branch code or password." },
+            { status: 401 }
+          );
+        }
+
+        branch = assignedBranch;
+        matchedStaffUser = staffUser;
+      } else {
+        // 3. Fallback: shared branch-level credentials ("GENSAN", "MALUNGON").
+        const { data: branchRow, error: branchError } = await supabase
+          .from("branches")
+          .select("*")
+          .eq("branch_code", identifier as BranchCode)
+          .maybeSingle();
+
+        if (branchError || !branchRow) {
+          return NextResponse.json(
+            { error: "Invalid username / branch code or password." },
+            { status: 401 }
+          );
+        }
+
+        const isPasswordValid = await verifyPassword(
+          password,
+          branchRow.password_hash
+        );
+        if (!isPasswordValid) {
+          return NextResponse.json(
+            { error: "Invalid username / branch code or password." },
+            { status: 401 }
+          );
+        }
+
+        branch = branchRow;
+      }
     }
 
     const deviceInfo = parseUserAgent(request.headers.get("user-agent"));
@@ -182,7 +281,9 @@ export async function POST(request: NextRequest) {
       const isApproved = isOwner ? true : !branch.require_device_approval;
       const deviceLabel = isOwner
         ? `${branch.is_dev ? "DEV Sandbox" : "Owner"} • ${deviceInfo.os_name} (${deviceInfo.browser_name})`
-        : `${deviceInfo.os_name} (${deviceInfo.browser_name})`;
+        : matchedStaffUser
+          ? `${matchedStaffUser.full_name} • ${deviceInfo.os_name} (${deviceInfo.browser_name})`
+          : `${deviceInfo.os_name} (${deviceInfo.browser_name})`;
 
       rawDeviceTokenToSet = generateRandomToken();
       const deviceTokenHash = hashToken(rawDeviceTokenToSet);
@@ -221,6 +322,7 @@ export async function POST(request: NextRequest) {
       .insert({
         branch_id: branch.id,
         device_id: device.id,
+        branch_user_id: matchedStaffUser?.id ?? null,
         session_token_hash: sessionTokenHash,
         device_type: deviceInfo.device_type,
         os_info: deviceInfo.os_name,
@@ -248,6 +350,9 @@ export async function POST(request: NextRequest) {
         branch_code: branch.branch_code,
         branch_name: branch.branch_name,
         is_dev: Boolean(branch.is_dev),
+        branch_user_id: matchedStaffUser?.id ?? null,
+        staff_username: matchedStaffUser?.username ?? null,
+        staff_name: matchedStaffUser?.full_name ?? null,
         device_label: device.device_label,
         is_approved: isOwner ? true : device.is_approved,
         device_type: deviceInfo.device_type,

@@ -30,7 +30,7 @@ const NAV_ITEMS = [
     label: "Devices & Sessions",
     icon: MonitorSmartphone,
   },
-  { href: "/owner/branches", label: "Branch Settings", icon: Building2 },
+  { href: "/owner/settings", label: "Branch Settings", icon: Building2 },
 ] as const;
 
 export default function OwnerNav({
@@ -74,7 +74,10 @@ export default function OwnerNav({
           {NAV_ITEMS.map((item) => {
             const Icon = item.icon;
             const active =
-              pathname === item.href || pathname.startsWith(`${item.href}/`);
+              pathname === item.href ||
+              pathname.startsWith(`${item.href}/`) ||
+              (item.href === "/owner/settings" &&
+                pathname.startsWith("/owner/branches"));
             return (
               <Link
                 key={item.href}
@@ -147,7 +150,10 @@ export default function OwnerNav({
         {NAV_ITEMS.map((item) => {
           const Icon = item.icon;
           const active =
-            pathname === item.href || pathname.startsWith(`${item.href}/`);
+            pathname === item.href ||
+            pathname.startsWith(`${item.href}/`) ||
+            (item.href === "/owner/settings" &&
+              pathname.startsWith("/owner/branches"));
           return (
             <Link
               key={item.href}
@@ -173,7 +179,10 @@ export default function OwnerNav({
             {NAV_ITEMS.map((item) => {
               const Icon = item.icon;
               const active =
-                pathname === item.href || pathname.startsWith(`${item.href}/`);
+                pathname === item.href ||
+                pathname.startsWith(`${item.href}/`) ||
+                (item.href === "/owner/settings" &&
+                  pathname.startsWith("/owner/branches"));
               return (
                 <Link
                   key={item.href}
